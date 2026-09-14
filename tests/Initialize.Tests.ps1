@@ -13,12 +13,13 @@ function Assert-BytesEqual {
 }
 
 function Get-TreeFingerprint {
-    param([string]$Path)
+    param([string]$Path, [string]$ExcludeRelativePath)
 
     if (-not (Test-Path -LiteralPath $Path)) { return '<absent>' }
     $items = @(Get-ChildItem -LiteralPath $Path -Recurse -Force | Sort-Object FullName)
     $lines = foreach ($item in $items) {
         $relative = $item.FullName.Substring($Path.TrimEnd([char]92, [char]'/' ).Length).TrimStart([char]92, [char]'/' ).Replace([char]92, [char]'/')
+        if ($relative -ceq $ExcludeRelativePath) { continue }
         if ($item.PSIsContainer) { "D $relative" } else { "F $relative $([Convert]::ToBase64String([System.IO.File]::ReadAllBytes($item.FullName)))" }
     }
     return [string]::Join("`n", @($lines))
@@ -27,13 +28,8 @@ function Get-TreeFingerprint {
 function Copy-Tree {
     param([string]$Source, [string]$Destination)
 
-    foreach ($file in Get-ChildItem -LiteralPath $Source -Recurse -File -Force) {
-        $relative = $file.FullName.Substring($Source.Length).TrimStart([char]92, [char]'/' )
-        $target = Join-Path $Destination $relative
-        $parent = Split-Path -Parent $target
-        New-Item -ItemType Directory -Path $parent -Force | Out-Null
-        [System.IO.File]::WriteAllBytes($target, [System.IO.File]::ReadAllBytes($file.FullName))
-    }
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    Get-ChildItem -LiteralPath $Source -Force | Copy-Item -Destination $Destination -Recurse -Force
 }
 
 function Write-ReleaseMetadata {
@@ -68,7 +64,7 @@ function New-InitializeFixture {
 
 function Remove-InitializeFixture {
     param($Fixture)
-    if ($Fixture -and (Test-Path -LiteralPath $Fixture.Container)) { Remove-Item -LiteralPath $Fixture.Container -Recurse -Force }
+    if ($Fixture -and (Test-Path -LiteralPath $Fixture.Container)) { [System.IO.Directory]::Delete($Fixture.Container, $true) }
 }
 
 function Invoke-Initializer {
@@ -234,6 +230,89 @@ Describe 'Инициализация прикладного проекта из 
             $before = Get-TreeFingerprint $fixture.Root
             Assert-Throws { & $InitializerPath -RepositoryRoot $fixture.Root -ProjectPath $fixture.Root -Version '1.0.0' -Overlay @('android') -Apply } 'репозитори|опасн'
             Assert-Equal (Get-TreeFingerprint $fixture.Root) $before
+        }
+        finally { Remove-InitializeFixture $fixture }
+    }
+
+    It 'отклоняет неполный base и недопустимый overlay после пересчёта hash и checksums' {
+        foreach ($mutation in @('missing-security', 'invalid-overlay')) {
+            $fixture = New-InitializeFixture
+            try {
+                if ($mutation -eq 'missing-security') {
+                    Remove-Item -LiteralPath (Join-Path $fixture.Release 'templates/base/docs/quality/security.md') -Force
+                }
+                else {
+                    $overlayPath = Join-Path $fixture.Release 'templates/overlays/android/overlay.json'
+                    $overlay = Get-Content -LiteralPath $overlayPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                    $overlay.PSObject.Properties.Remove('verificationCommands')
+                    [System.IO.File]::WriteAllBytes($overlayPath, $Utf8.GetBytes(($overlay | ConvertTo-Json) + "`n"))
+                }
+                Write-ReleaseMetadata -ReleasePath $fixture.Release
+                $before = Get-TreeFingerprint $fixture.Project
+
+                Assert-Throws { Invoke-Initializer -Fixture $fixture -Apply } 'base|overlay|снимок|manifest'
+
+                Assert-Equal (Get-TreeFingerprint $fixture.Project) $before
+            }
+            finally { Remove-InitializeFixture $fixture }
+        }
+    }
+
+    It 'маршрутизирует composite coercion manifest к Sync без записи' {
+        $fixture = New-InitializeFixture
+        try {
+            Invoke-Initializer -Fixture $fixture -Overlays @('android') -Apply | Out-Null
+            $manifest = Get-ProjectManifest $fixture
+            $invalid = [ordered]@{
+                schemaVersion = '1'
+                rulesSource = $manifest.rulesSource
+                rulesVersion = $manifest.rulesVersion
+                rulesCommit = $manifest.rulesCommit
+                releaseContentHash = $manifest.releaseContentHash
+                installedContentHash = $manifest.installedContentHash
+                overlays = 'android'
+                installedAt = '2026-09-14'
+                updatedAt = '2026-09-14'
+            } | ConvertTo-Json
+            $manifestPath = Join-Path $fixture.Project '.codex/governance/manifest.json'
+            [System.IO.File]::WriteAllBytes($manifestPath, $Utf8.GetBytes($invalid + "`n"))
+            $before = Get-TreeFingerprint $fixture.Project
+
+            Assert-Throws { Invoke-Initializer -Fixture $fixture -Overlays @('android') -Apply } 'Sync-ProjectRules'
+
+            Assert-Equal (Get-TreeFingerprint $fixture.Project) $before
+        }
+        finally { Remove-InitializeFixture $fixture }
+    }
+
+    It 'откатывает поздний сбой после backup, сохраняя concurrent файл' {
+        $fixture = New-InitializeFixture
+        try {
+            $agentsPath = Join-Path $fixture.Project 'AGENTS.md'
+            $statusPath = Join-Path $fixture.Project 'docs/status/current.md'
+            New-Item -ItemType Directory -Path (Split-Path -Parent $statusPath) -Force | Out-Null
+            [System.IO.File]::WriteAllBytes($agentsPath, $Utf8.GetBytes('пользовательский AGENTS'))
+            [System.IO.File]::WriteAllBytes($statusPath, $Utf8.GetBytes('пользовательский status'))
+            $baseline = Get-TreeFingerprint $fixture.Project
+            $concurrentPath = Join-Path $fixture.Project 'concurrent-user.md'
+            $state = [PSCustomObject]@{ Calls = 0 }
+            $lateFailure = {
+                $state.Calls++
+                if ($state.Calls -eq 2) {
+                    [System.IO.File]::WriteAllBytes($concurrentPath, $Utf8.GetBytes('конкурентная правка'))
+                    throw 'инъецированный поздний сбой'
+                }
+            }
+
+            Assert-Throws {
+                & $InitializerPath -RepositoryRoot $fixture.Root -ProjectPath $fixture.Project -Version '1.0.0' -Overlay @('android') -Apply -TestBeforeExistingMove $lateFailure
+            } 'инъецированный поздний сбой'
+
+            Assert-Equal $state.Calls 2
+            Assert-Equal (Get-TreeFingerprint $fixture.Project -ExcludeRelativePath 'concurrent-user.md') $baseline
+            Assert-Equal (Get-Content -LiteralPath $concurrentPath -Raw -Encoding UTF8) 'конкурентная правка'
+            Assert-Equal (@(Get-ChildItem -LiteralPath $fixture.Project -Recurse -Force -Filter '*.backup-*' -File).Count) 0
+            Assert-Equal (@(Get-ChildItem -LiteralPath $fixture.Project -Recurse -Force -Filter '.governance.tmp-*' -File).Count) 0
         }
         finally { Remove-InitializeFixture $fixture }
     }

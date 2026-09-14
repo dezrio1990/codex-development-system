@@ -81,11 +81,52 @@ function Assert-StrictProperties {
     foreach ($name in $Names) { if ($actual -cnotcontains $name) { throw "$Description не содержит поле $name." } }
 }
 
+function Assert-Rfc3339DateTime {
+    param($Value, [string]$Description)
+    $text = if ($Value -is [DateTime]) { $Value.ToString('o', [Globalization.CultureInfo]::InvariantCulture) } elseif ($Value -is [string]) { $Value } else { $null }
+    if ($text -isnot [string] -or $text -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,7})?(Z|[+-]\d{2}:\d{2})$') { throw "$Description должен быть RFC3339 date-time с timezone." }
+    try { [DateTimeOffset]::Parse($text, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) | Out-Null }
+    catch { throw "$Description содержит невозможную дату." }
+}
+
+function Get-PortableRelativePath {
+    param([string]$Root, [string]$Path)
+    $relative = [IO.Path]::GetFullPath($Path).Substring([IO.Path]::GetFullPath($Root).TrimEnd([char]92, [char]'/').Length).TrimStart([char]92, [char]'/').Replace([char]92, [char]'/')
+    if ([string]::IsNullOrWhiteSpace($relative) -or $relative -match '(^|/)\.\.?(?:/|$)' -or $relative -match '[:<>"|?*]') { throw "Небезопасный путь в выпуске: $relative" }
+    return $relative
+}
+
+function Assert-SafeReleaseTree {
+    param([string]$Path)
+    foreach ($item in @(Get-ChildItem -LiteralPath $Path -Recurse -Force)) {
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Выпуск содержит небезопасный reparse point: $($item.FullName)" }
+        Get-PortableRelativePath $Path $item.FullName | Out-Null
+    }
+}
+
+function Assert-ExactFileContract {
+    param([string]$Root, [string[]]$Expected, [string]$Description)
+    Assert-SafeReleaseTree $Root
+    $actual = @(Get-ChildItem -LiteralPath $Root -Recurse -File -Force | ForEach-Object { Get-PortableRelativePath $Root $_.FullName })
+    [Array]::Sort($actual, [StringComparer]::OrdinalIgnoreCase)
+    $wanted = @($Expected)
+    [Array]::Sort($wanted, [StringComparer]::OrdinalIgnoreCase)
+    if ($actual.Count -ne $wanted.Count) { throw "$Description имеет недопустимый состав файлов." }
+    for ($index = 0; $index -lt $wanted.Count; $index++) { if ($actual[$index] -cne $wanted[$index]) { throw "$Description имеет недопустимый файл: $($actual[$index])" } }
+}
+
+function Assert-StringArray {
+    param($Value, [string]$Description, [string]$Pattern)
+    if ($Value -isnot [System.Array] -or $Value.Count -eq 0) { throw "$Description должен быть непустым JSON-массивом." }
+    foreach ($item in $Value) { if ($item -isnot [string] -or [string]::IsNullOrWhiteSpace($item) -or ($Pattern -and $item -cnotmatch $Pattern)) { throw "$Description содержит недопустимый элемент." } }
+}
+
 function Get-VerifiedRelease {
     param([string]$Repository, [string]$RequestedVersion)
     $release = Get-GovernanceVersionPath -RepositoryRoot $Repository -Version $RequestedVersion
     if (-not (Test-Path -LiteralPath $release.FullName -PathType Container)) { throw "Опубликованный выпуск не найден: $RequestedVersion" }
     Assert-NoReparsePoint $release.FullName
+    Assert-SafeReleaseTree $release.FullName
     $versionPath = Join-Path $release.FullName 'version.json'
     $checksumsPath = Join-Path $release.FullName 'checksums.sha256'
     if (-not (Test-Path -LiteralPath $versionPath -PathType Leaf) -or -not (Test-Path -LiteralPath $checksumsPath -PathType Leaf)) { throw 'Выпуск не содержит version.json или checksums.sha256.' }
@@ -93,20 +134,27 @@ function Get-VerifiedRelease {
     catch { throw "Некорректный version.json: $($_.Exception.Message)" }
     Assert-StrictProperties $metadata @('version', 'channel', 'gitTag', 'gitCommit', 'contentHash', 'releasedAt') 'version.json'
     if ($metadata.version -isnot [string] -or $metadata.version -cne $RequestedVersion -or $metadata.version -cnotmatch $semVerPattern) { throw 'version.json содержит неверную версию.' }
-    if ($metadata.channel -cne 'stable' -or $metadata.gitTag -cne ('v' + $RequestedVersion)) { throw 'version.json содержит неверный channel или gitTag.' }
+    if ($metadata.channel -isnot [string] -or $metadata.channel -cne 'stable' -or $metadata.gitTag -isnot [string] -or $metadata.gitTag -cne ('v' + $RequestedVersion)) { throw 'version.json содержит неверный channel или gitTag.' }
     if ($metadata.gitCommit -isnot [string] -or $metadata.gitCommit -cnotmatch '^[0-9a-f]{40}$') { throw 'version.json содержит неверный gitCommit.' }
     if ($metadata.contentHash -isnot [string] -or $metadata.contentHash -cnotmatch '^[0-9a-f]{64}$') { throw 'version.json содержит неверный contentHash.' }
-    try { [DateTimeOffset]::Parse($metadata.releasedAt, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) | Out-Null }
-    catch { throw 'version.json содержит неверный releasedAt.' }
+    Assert-Rfc3339DateTime $metadata.releasedAt 'version.json.releasedAt'
     $actualHash = Get-GovernanceContentHash -RootPath $release.FullName
     if ($actualHash -cne $metadata.contentHash) { throw 'Content hash выпуска не совпадает с version.json.' }
     $expectedChecksums = @(Get-GovernanceChecksums -RootPath $release.FullName)
     $expectedBytes = $utf8.GetBytes((($expectedChecksums -join "`n") + "`n"))
     if (-not (Test-BytesEqual ([System.IO.File]::ReadAllBytes($checksumsPath)) $expectedBytes)) { throw 'Checksums выпуска не совпадают с фактическим payload или содержат unsafe/duplicate paths.' }
     $base = Join-Path $release.FullName 'templates/base'
-    foreach ($required in @('AGENTS.md', '.codex/governance/README.md', 'docs/status/current.md', 'docs/plans/templates/active-plan.md')) {
-        if (-not (Test-Path -LiteralPath (Join-Path $base $required) -PathType Leaf)) { throw "Неполный base template: отсутствует $required" }
-    }
+    $baseContract = @(
+        '.codex/governance/README.md', 'AGENTS.md',
+        'docs/architecture/data-model.md', 'docs/architecture/decisions/ADR-template.md', 'docs/architecture/integrations.md', 'docs/architecture/overview.md', 'docs/architecture/technology-stack.md',
+        'docs/operations/backup-and-recovery.md', 'docs/operations/deployment.md', 'docs/operations/incident-response.md', 'docs/operations/observability.md',
+        'docs/plans/active/.gitkeep', 'docs/plans/completed/.gitkeep', 'docs/plans/templates/active-plan.md', 'docs/plans/templates/agent-task.md', 'docs/plans/templates/migration-analysis.md',
+        'docs/product/roadmap.md', 'docs/product/scope.md', 'docs/product/vision.md',
+        'docs/quality/quality-gates.md', 'docs/quality/security.md', 'docs/quality/test-strategy.md',
+        'docs/requirements/backlog.md', 'docs/requirements/functional.md', 'docs/requirements/non-functional.md',
+        'docs/status/changelog.md', 'docs/status/current.md'
+    )
+    Assert-ExactFileContract $base $baseContract 'Base template выпуска'
     return [PSCustomObject]@{ Path = $release.FullName; Metadata = $metadata; ContentHash = $actualHash; Base = $base }
 }
 
@@ -118,12 +166,21 @@ function Get-CanonicalOverlays {
     foreach ($name in $Requested) {
         if ([string]::IsNullOrWhiteSpace($name) -or $name -cnotmatch '^[a-z0-9-]+$') { throw "Недопустимое имя overlay: $name" }
         if (-not $seen.Add($name)) { throw "Повторный overlay: $name" }
-        $manifestPath = Join-Path $ReleasePath (Join-Path 'templates/overlays' (Join-Path $name 'overlay.json'))
-        $appendPath = Join-Path $ReleasePath (Join-Path 'templates/overlays' (Join-Path $name 'AGENTS.append.md'))
+        $overlayDirectory = Join-Path $ReleasePath (Join-Path 'templates/overlays' $name)
+        $manifestPath = Join-Path $overlayDirectory 'overlay.json'
+        $appendPath = Join-Path $overlayDirectory 'AGENTS.append.md'
         if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf) -or -not (Test-Path -LiteralPath $appendPath -PathType Leaf)) { throw "Overlay не найден или неполон: $name" }
         try { $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop }
         catch { throw "Некорректный manifest overlay $name." }
-        if ($manifest.name -isnot [string] -or $manifest.name -cne $name) { throw "Manifest overlay не совпадает с именем каталога: $name" }
+        Assert-ExactFileContract $overlayDirectory @('AGENTS.append.md', 'overlay.json') "Overlay $name"
+        Assert-StrictProperties $manifest @('displayName', 'name', 'requiredTools', 'targetDirectories', 'verificationCommands', 'version') "Manifest overlay $name"
+        if ($manifest.name -isnot [string] -or $manifest.name -cne $name -or $manifest.displayName -isnot [string] -or [string]::IsNullOrWhiteSpace($manifest.displayName) -or $manifest.version -isnot [string] -or $manifest.version -cnotmatch $semVerPattern) { throw "Manifest overlay содержит неверные name, displayName или version: $name" }
+        Assert-StringArray $manifest.targetDirectories "Manifest overlay $name.targetDirectories" $null
+        foreach ($targetDirectory in $manifest.targetDirectories) {
+            if ([IO.Path]::IsPathRooted($targetDirectory) -or ($targetDirectory -cne '.' -and ($targetDirectory.Contains([char]92) -or $targetDirectory -match '(^|/)\.\.?(?:/|$)' -or $targetDirectory -match '[:<>"|?*]'))) { throw "Manifest overlay содержит небезопасный targetDirectory: $name" }
+        }
+        Assert-StringArray $manifest.requiredTools "Manifest overlay $name.requiredTools" '^[a-z][a-z0-9-]*$'
+        Assert-StringArray $manifest.verificationCommands "Manifest overlay $name.verificationCommands" $null
         $names.Add($name)
     }
     $result = $names.ToArray()
@@ -169,11 +226,15 @@ function Test-CurrentPin {
     catch { throw 'Существующий manifest malformed. Используйте Sync-ProjectRules.ps1.' }
     try {
         Assert-StrictProperties $manifest @('schemaVersion', 'rulesSource', 'rulesVersion', 'rulesCommit', 'releaseContentHash', 'installedContentHash', 'overlays', 'installedAt', 'updatedAt') 'manifest'
-        if ($manifest.schemaVersion -ne 1 -or $manifest.rulesSource -cne $rulesSource -or $manifest.rulesVersion -cne $Release.Metadata.version -or $manifest.rulesCommit -cne $Release.Metadata.gitCommit -or $manifest.releaseContentHash -cne $Release.ContentHash) { throw 'pin отличается' }
+        if ($manifest.schemaVersion -isnot [byte] -and $manifest.schemaVersion -isnot [int16] -and $manifest.schemaVersion -isnot [int32] -and $manifest.schemaVersion -isnot [int64]) { throw 'manifest.schemaVersion должен быть JSON integer' }
+        if ($manifest.schemaVersion -ne 1 -or $manifest.rulesSource -isnot [string] -or $manifest.rulesSource -cne $rulesSource -or $manifest.rulesVersion -isnot [string] -or $manifest.rulesVersion -cne $Release.Metadata.version -or $manifest.rulesVersion -cnotmatch $semVerPattern -or $manifest.rulesCommit -isnot [string] -or $manifest.rulesCommit -cne $Release.Metadata.gitCommit -or $manifest.releaseContentHash -isnot [string] -or $manifest.releaseContentHash -cne $Release.ContentHash) { throw 'pin отличается' }
         $currentOverlays = @($manifest.overlays)
-        if ($manifest.rulesCommit -isnot [string] -or $manifest.rulesCommit -cnotmatch '^[0-9a-f]{40}$' -or $manifest.releaseContentHash -isnot [string] -or $manifest.releaseContentHash -cnotmatch '^[0-9a-f]{64}$' -or $manifest.installedContentHash -isnot [string] -or $manifest.installedContentHash -cnotmatch '^[0-9a-f]{64}$') { throw 'manifest имеет неверные hash-поля' }
-        try { [DateTimeOffset]::Parse($manifest.installedAt, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) | Out-Null; [DateTimeOffset]::Parse($manifest.updatedAt, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) | Out-Null } catch { throw 'manifest имеет неверные даты' }
-        foreach ($name in $currentOverlays) { if ($name -isnot [string] -or $name -cnotmatch '^[a-z0-9-]+$') { throw 'manifest имеет неверный overlay' } }
+        if ($manifest.overlays -isnot [System.Array]) { throw 'manifest.overlays должен быть JSON-массивом' }
+        if ($manifest.rulesCommit -cnotmatch '^[0-9a-f]{40}$' -or $manifest.releaseContentHash -cnotmatch '^[0-9a-f]{64}$' -or $manifest.installedContentHash -isnot [string] -or $manifest.installedContentHash -cnotmatch '^[0-9a-f]{64}$') { throw 'manifest имеет неверные hash-поля' }
+        Assert-Rfc3339DateTime $manifest.installedAt 'manifest.installedAt'
+        Assert-Rfc3339DateTime $manifest.updatedAt 'manifest.updatedAt'
+        $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($name in $currentOverlays) { if ($name -isnot [string] -or $name -cnotmatch '^[a-z0-9-]+$' -or -not $seen.Add($name)) { throw 'manifest имеет неверный или повторный overlay' } }
         if ($currentOverlays.Count -ne $Overlays.Count) { throw 'overlay отличается' }
         for ($i = 0; $i -lt $Overlays.Count; $i++) { if ($currentOverlays[$i] -cne $Overlays[$i]) { throw 'overlay отличается' } }
         $files = @($Overlays | ForEach-Object { Join-Path $Project ('.codex/governance/overlays/' + $_ + '.md') })
@@ -193,29 +254,81 @@ function Assert-OperationState {
     if ($exists -and -not (Test-BytesEqual ([IO.File]::ReadAllBytes($Operation.Target)) $Operation.ExpectedBytes)) { throw "Destination изменился после плана: $($Operation.Target)" }
 }
 
+function Ensure-OperationDirectory {
+    param([string]$Path, $Journal)
+    $missing = [Collections.Generic.List[string]]::new()
+    $current = [IO.Path]::GetFullPath($Path)
+    while (-not (Test-Path -LiteralPath $current)) {
+        $missing.Add($current)
+        $parent = Split-Path -Parent $current
+        if ([string]::IsNullOrWhiteSpace($parent) -or (Test-ExactPath $parent $current)) { throw "Невозможно создать каталог назначения: $Path" }
+        $current = $parent
+    }
+    for ($index = $missing.Count - 1; $index -ge 0; $index--) {
+        New-Item -ItemType Directory -Path $missing[$index] -ErrorAction Stop | Out-Null
+        $Journal.Entries.Add([PSCustomObject]@{ Kind = 'Directory'; Path = $missing[$index]; Bytes = $null; Target = $null; Backup = $null })
+    }
+}
+
 function Write-Operation {
-    param($Operation)
+    param($Operation, $Journal)
     $directory = Split-Path -Parent $Operation.Target
-    New-Item -ItemType Directory -Path $directory -Force -ErrorAction Stop | Out-Null
+    Ensure-OperationDirectory $directory $Journal
     Assert-OperationState $Operation
     $temporary = Join-Path $directory ('.governance.tmp-' + [guid]::NewGuid().ToString('N'))
     try {
         $stream = [IO.File]::Open($temporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
         try { $stream.Write($Operation.Bytes, 0, $Operation.Bytes.Length) } finally { $stream.Dispose() }
         Assert-OperationState $Operation
-        if (-not $Operation.ExpectedExists) { [IO.File]::Move($temporary, $Operation.Target); return }
+        if (-not $Operation.ExpectedExists) {
+            [IO.File]::Move($temporary, $Operation.Target)
+            $Journal.Entries.Add([PSCustomObject]@{ Kind = 'CreatedFile'; Path = $Operation.Target; Bytes = $Operation.Bytes; Target = $null; Backup = $null })
+            return
+        }
         if ($null -ne $TestBeforeExistingMove) { & $TestBeforeExistingMove }
         Assert-OperationState $Operation
         [IO.File]::Move($Operation.Target, $Operation.Backup)
+        $Journal.Entries.Add([PSCustomObject]@{ Kind = 'Backup'; Path = $null; Bytes = $Operation.ExpectedBytes; Target = $Operation.Target; Backup = $Operation.Backup })
         if (-not (Test-BytesEqual ([IO.File]::ReadAllBytes($Operation.Backup)) $Operation.ExpectedBytes)) {
-            if (-not (Test-Path -LiteralPath $Operation.Target)) { [IO.File]::Move($Operation.Backup, $Operation.Target) }
+            if (-not (Test-Path -LiteralPath $Operation.Target)) {
+                [IO.File]::Move($Operation.Backup, $Operation.Target)
+                $Journal.Entries.RemoveAt($Journal.Entries.Count - 1)
+            }
             throw "Destination изменился перед заменой; восстановлен: $($Operation.Target)"
         }
         [IO.File]::Move($temporary, $Operation.Target)
+        $Journal.Entries.Add([PSCustomObject]@{ Kind = 'CreatedFile'; Path = $Operation.Target; Bytes = $Operation.Bytes; Target = $null; Backup = $null })
     }
     finally {
         if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
     }
+}
+
+function Rollback-Apply {
+    param($Journal)
+    $recovery = [Collections.Generic.List[string]]::new()
+    for ($index = $Journal.Entries.Count - 1; $index -ge 0; $index--) {
+        $entry = $Journal.Entries[$index]
+        try {
+            if ($entry.Kind -ceq 'CreatedFile') {
+                if (Test-Path -LiteralPath $entry.Path -PathType Leaf) {
+                    if (Test-BytesEqual ([IO.File]::ReadAllBytes($entry.Path)) $entry.Bytes) { Remove-Item -LiteralPath $entry.Path -Force -ErrorAction Stop }
+                    else { $recovery.Add("не удалён concurrent файл: $($entry.Path)") }
+                }
+            }
+            elseif ($entry.Kind -ceq 'Backup') {
+                if (-not (Test-Path -LiteralPath $entry.Backup -PathType Leaf)) { $recovery.Add("не найден backup для восстановления: $($entry.Backup)") }
+                elseif (Test-Path -LiteralPath $entry.Target) { $recovery.Add("target занят, backup сохранён: $($entry.Backup)") }
+                elseif (-not (Test-BytesEqual ([IO.File]::ReadAllBytes($entry.Backup)) $entry.Bytes)) { $recovery.Add("backup изменён, сохранён: $($entry.Backup)") }
+                else { [IO.File]::Move($entry.Backup, $entry.Target) }
+            }
+            elseif ($entry.Kind -ceq 'Directory' -and (Test-Path -LiteralPath $entry.Path -PathType Container)) {
+                if (@(Get-ChildItem -LiteralPath $entry.Path -Force).Count -eq 0) { Remove-Item -LiteralPath $entry.Path -Force -ErrorAction Stop }
+            }
+        }
+        catch { $recovery.Add("не удалось откатить $($entry.Kind): $($entry.Path)$($entry.Backup)") }
+    }
+    return @($recovery)
 }
 
 $repository = [IO.Path]::GetFullPath($RepositoryRoot)
@@ -267,6 +380,16 @@ $operations.Add((New-Operation (Join-Path $project '.codex/governance/manifest.j
 
 $plan = @($operations | Sort-Object Target | ForEach-Object { [PSCustomObject]@{ Action = if ($_.ExpectedExists) { 'BackupAndWrite' } else { 'Write' }; Target = $_.Target; Backup = $_.Backup } })
 if (-not $Apply) { Write-Output $plan; return }
+foreach ($operation in $operations) { Assert-OperationState $operation }
 if ($null -ne $TestBeforeApply) { & $TestBeforeApply }
-foreach ($operation in $operations) { Write-Operation $operation }
+$journal = [PSCustomObject]@{ Entries = [Collections.Generic.List[object]]::new() }
+try {
+    foreach ($operation in $operations) { Write-Operation $operation $journal }
+}
+catch {
+    $originalMessage = $_.Exception.Message
+    $recovery = @(Rollback-Apply $journal)
+    if ($recovery.Count -gt 0) { throw "$originalMessage Recovery: $($recovery -join '; ')" }
+    throw $originalMessage
+}
 Write-Output $plan
