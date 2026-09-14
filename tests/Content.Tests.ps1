@@ -45,6 +45,46 @@ function Assert-TextNotMatches {
     }
 }
 
+function Assert-MarkdownTablesHaveMatchingColumnCounts {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $tables = @()
+    $currentTable = @()
+    foreach ($line in Get-Content -LiteralPath $Path -Encoding UTF8 -ErrorAction Stop) {
+        if ($line -match '^\|.*\|\s*$') {
+            $currentTable += $line
+            continue
+        }
+
+        if ($currentTable.Count -gt 0) {
+            $tables += ,@($currentTable)
+            $currentTable = @()
+        }
+    }
+
+    if ($currentTable.Count -gt 0) {
+        $tables += ,@($currentTable)
+    }
+
+    if ($tables.Count -eq 0) {
+        throw "В '$Path' не найдено Markdown-таблиц."
+    }
+
+    foreach ($table in $tables) {
+        if ($table.Count -lt 3) {
+            throw "В '$Path' Markdown-таблица должна содержать header, separator и строку примера."
+        }
+
+        $headerCount = $table[0].Trim().Trim('|').Split('|').Count
+        for ($index = 1; $index -lt $table.Count; $index++) {
+            $rowCount = $table[$index].Trim().Trim('|').Split('|').Count
+            if ($rowCount -ne $headerCount) {
+                throw "В '$Path' строка таблицы с индексом $index содержит $rowCount колонок при $headerCount колонках header."
+            }
+        }
+    }
+}
+
 function Get-RoleToml {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -308,6 +348,15 @@ Describe 'Базовые шаблоны проектной документац�
 
         foreach ($marker in @('NFR-', 'SEC-', 'ACC-', 'OPS-', 'Метрика', 'Метод проверки', 'Источник', 'Статус', 'Ссылки', 'Явные исключения', 'Must', 'Should', 'Could', "Won't now")) {
             Assert-TextContains $nonFunctional $marker
+        }
+    }
+
+    It 'Markdown-таблицы требований имеют одинаковое число колонок' {
+        foreach ($path in @(
+            (Join-Path $BaseTemplatesPath 'docs/requirements/functional.md'),
+            (Join-Path $BaseTemplatesPath 'docs/requirements/non-functional.md')
+        )) {
+            Assert-MarkdownTablesHaveMatchingColumnCounts -Path $path
         }
     }
 
