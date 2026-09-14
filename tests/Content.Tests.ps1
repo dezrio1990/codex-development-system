@@ -1,6 +1,16 @@
 ﻿$Root = Split-Path -Parent $PSScriptRoot
 $GlobalRulesPath = Join-Path $Root 'current/global/AGENTS.md'
 $AgentsPath = Join-Path $Root 'current/global/agents'
+$BaseTemplatesPath = Join-Path $Root 'current/templates/base'
+
+function Get-ManagedTemplates {
+    if (-not (Test-Path -LiteralPath $BaseTemplatesPath)) {
+        return @()
+    }
+
+    return @(Get-ChildItem -LiteralPath $BaseTemplatesPath -Recurse -File -Filter '*.md' -ErrorAction Stop |
+        Sort-Object -Property FullName)
+}
 
 function Assert-TextContains {
     param(
@@ -10,6 +20,28 @@ function Assert-TextContains {
 
     if ($Text.IndexOf($ExpectedText, [System.StringComparison]::Ordinal) -lt 0) {
         throw "Не найден обязательный текст: '$ExpectedText'."
+    }
+}
+
+function Assert-TextMatches {
+    param(
+        [Parameter(Mandatory = $true)][string]$Text,
+        [Parameter(Mandatory = $true)][string]$Pattern
+    )
+
+    if ($Text -notmatch $Pattern) {
+        throw "Текст не соответствует обязательному шаблону '$Pattern'."
+    }
+}
+
+function Assert-TextNotMatches {
+    param(
+        [Parameter(Mandatory = $true)][string]$Text,
+        [Parameter(Mandatory = $true)][string]$Pattern
+    )
+
+    if ($Text -match $Pattern) {
+        throw "Текст соответствует запрещённому шаблону '$Pattern'."
     }
 }
 
@@ -163,6 +195,106 @@ Describe 'Глобальные правила и роли' {
             foreach ($marker in $requiredMarkersByRole[$roleName]) {
                 Assert-TextContains $role['developer_instructions'] $marker
             }
+        }
+    }
+}
+
+Describe 'Базовые шаблоны проектной документации' {
+    It 'содержит полный ожидаемый набор управляемых шаблонов' {
+        $expected = @(
+            'AGENTS.md',
+            '.codex/governance/README.md',
+            'docs/product/vision.md',
+            'docs/product/scope.md',
+            'docs/product/roadmap.md',
+            'docs/requirements/functional.md',
+            'docs/requirements/non-functional.md',
+            'docs/requirements/backlog.md',
+            'docs/architecture/overview.md',
+            'docs/architecture/technology-stack.md',
+            'docs/architecture/data-model.md',
+            'docs/architecture/integrations.md',
+            'docs/architecture/decisions/ADR-template.md',
+            'docs/plans/templates/active-plan.md',
+            'docs/plans/templates/agent-task.md',
+            'docs/plans/templates/migration-analysis.md',
+            'docs/quality/quality-gates.md',
+            'docs/quality/test-strategy.md',
+            'docs/quality/security.md',
+            'docs/operations/deployment.md',
+            'docs/operations/observability.md',
+            'docs/operations/backup-and-recovery.md',
+            'docs/operations/incident-response.md',
+            'docs/status/current.md',
+            'docs/status/changelog.md'
+        )
+
+        $actual = @(Get-ManagedTemplates | ForEach-Object {
+            $_.FullName.Substring($BaseTemplatesPath.Length).TrimStart([char]'\', [char]'/').Replace('\', '/')
+        })
+
+        Assert-SequenceEqual $actual @($expected | Sort-Object)
+    }
+
+    It 'каждый управляемый Markdown-шаблон начинается с YAML-метаданных и Draft' {
+        foreach ($file in Get-ManagedTemplates) {
+            $content = Get-Content -LiteralPath $file.FullName -Encoding UTF8 -Raw -ErrorAction Stop
+            Assert-TextMatches $content '^---\r?\n'
+            Assert-TextContains $content 'status: Draft'
+            Assert-TextContains $content 'owner:'
+            Assert-TextContains $content 'created:'
+            Assert-TextContains $content 'updated:'
+            Assert-TextContains $content 'related:'
+        }
+    }
+
+    It 'использует только разрешённые токены и не содержит абсолютных путей компьютера' {
+        $allowedTokens = @(
+            '{{PROJECT_NAME}}',
+            '{{DATE}}',
+            '{{RULES_VERSION}}',
+            '{{RULES_COMMIT}}',
+            '{{CONTENT_HASH}}',
+            '{{OVERLAYS_JSON}}'
+        )
+
+        foreach ($file in Get-ManagedTemplates) {
+            $content = Get-Content -LiteralPath $file.FullName -Encoding UTF8 -Raw -ErrorAction Stop
+            foreach ($match in [regex]::Matches($content, '\{\{[^}]+\}\}')) {
+                if ($allowedTokens -notcontains $match.Value) {
+                    throw "В '$($file.FullName)' используется неразрешённый токен '$($match.Value)'."
+                }
+            }
+
+            Assert-TextNotMatches $content '(?im)(?:^[A-Z]:\\|/Users/|/home/|C:\\Users\\)'
+        }
+    }
+
+    It 'current status содержит обязательную точку восстановления контекста' {
+        $content = Get-Content -LiteralPath (Join-Path $BaseTemplatesPath 'docs/status/current.md') -Encoding UTF8 -Raw -ErrorAction Stop
+        foreach ($section in @('Продукт', 'Утверждённый стек', 'Milestone', 'Активный план', 'Завершённое', 'Выполняемое', 'Ожидающие решения', 'Риски', 'Фактические проверки', 'Следующий шаг', 'Обязательное чтение')) {
+            Assert-TextContains $content $section
+        }
+    }
+
+    It 'шаблон активного плана содержит управляемые границы этапа' {
+        $content = Get-Content -LiteralPath (Join-Path $BaseTemplatesPath 'docs/plans/templates/active-plan.md') -Encoding UTF8 -Raw -ErrorAction Stop
+        foreach ($section in @('Цель', 'Требования', 'Scope', 'Владение', 'Шаги', 'Критерии приёмки', 'Команды и проверки', 'Риски', 'Зависимости', 'Журнал отклонений и решений')) {
+            Assert-TextContains $content $section
+        }
+    }
+
+    It 'ADR-template фиксирует основания решения и условия пересмотра' {
+        $content = Get-Content -LiteralPath (Join-Path $BaseTemplatesPath 'docs/architecture/decisions/ADR-template.md') -Encoding UTF8 -Raw -ErrorAction Stop
+        foreach ($section in @('Контекст', 'Варианты', 'Решение', 'Последствия', 'Условия пересмотра', 'утверждённые ТЗ, roadmap или ADR')) {
+            Assert-TextContains $content $section
+        }
+    }
+
+    It 'roadmap разрешает реализацию только для Now' {
+        $content = Get-Content -LiteralPath (Join-Path $BaseTemplatesPath 'docs/product/roadmap.md') -Encoding UTF8 -Raw -ErrorAction Stop
+        foreach ($section in @('Now', 'Next', 'Later', 'Not planned', 'Только элементы Now разрешают реализацию')) {
+            Assert-TextContains $content $section
         }
     }
 }
