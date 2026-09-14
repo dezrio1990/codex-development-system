@@ -2,6 +2,57 @@
 $GlobalRulesPath = Join-Path $Root 'current/global/AGENTS.md'
 $AgentsPath = Join-Path $Root 'current/global/agents'
 $BaseTemplatesPath = Join-Path $Root 'current/templates/base'
+$OverlaysPath = Join-Path $Root 'current/templates/overlays'
+
+function Assert-OrdinalSequenceEqual {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Actual,
+        [Parameter(Mandatory = $true)][string[]]$Expected
+    )
+
+    if ($Actual.Count -ne $Expected.Count) {
+        throw "Ожидалось элементов: $($Expected.Count), получено: $($Actual.Count)."
+    }
+
+    for ($index = 0; $index -lt $Expected.Count; $index++) {
+        if (-not [System.StringComparer]::Ordinal.Equals($Actual[$index], $Expected[$index])) {
+            throw "Элемент с индексом $index не совпадает: ожидалось '$($Expected[$index])', получено '$($Actual[$index])'."
+        }
+    }
+}
+
+function Get-OverlayManifests {
+    if (-not (Test-Path -LiteralPath $OverlaysPath)) {
+        return @()
+    }
+
+    return @(Get-ChildItem -LiteralPath $OverlaysPath -Directory -ErrorAction Stop |
+        Sort-Object -Property Name |
+        ForEach-Object {
+            $manifestPath = Join-Path $_.FullName 'overlay.json'
+            if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+                throw "Overlay '$($_.Name)' не содержит overlay.json."
+            }
+
+            [PSCustomObject]@{
+                Directory = $_
+                Path = $manifestPath
+                Value = Get-Content -LiteralPath $manifestPath -Encoding UTF8 -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            }
+        })
+}
+
+function Assert-SafeOverlayTargetDirectory {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or [System.IO.Path]::IsPathRooted($Path)) {
+        throw "Путь применения overlay должен быть непустым относительным путём: '$Path'."
+    }
+
+    if ($Path -ne '.' -and ($Path.Contains('\') -or $Path -match '(^|/)\.\.?($|/)' -or $Path -match '[:<>"|?*]')) {
+        throw "Путь применения overlay небезопасен или непереносим: '$Path'."
+    }
+}
 
 function Get-ManagedTemplates {
     if (-not (Test-Path -LiteralPath $BaseTemplatesPath)) {
@@ -377,6 +428,137 @@ Describe 'Базовые шаблоны проектной документац�
     It 'technology stack сохраняет доказательства и решение пользователя' {
         $content = Get-Content -LiteralPath (Join-Path $BaseTemplatesPath 'docs/architecture/technology-stack.md') -Encoding UTF8 -Raw -ErrorAction Stop
         foreach ($marker in @('Дата проверки', 'Официальные источники', 'Поддержка', 'Зрелость', 'Производительность', 'Безопасность', 'Стоимость сопровождения', 'Инструменты', 'Минимум два жизнеспособных варианта', 'Сравнение вариантов', 'Рекомендация', 'Ограничения', 'Решение пользователя', 'Preview и experimental API', 'прототипах или через отдельный ADR')) {
+            Assert-TextContains $content $marker
+        }
+    }
+}
+
+Describe 'Платформенные overlays' {
+    It 'содержит ровно пять ожидаемых overlays с двумя файлами в каждом' {
+        $expected = @('android', 'dotnet', 'dotnet-maui', 'ios', 'web')
+        $actual = @(Get-ChildItem -LiteralPath $OverlaysPath -Directory -ErrorAction Stop |
+            ForEach-Object { $_.Name } |
+            Sort-Object)
+
+        Assert-OrdinalSequenceEqual -Actual $actual -Expected $expected
+
+        foreach ($name in $expected) {
+            $directory = Join-Path $OverlaysPath $name
+            $files = @(Get-ChildItem -LiteralPath $directory -File -ErrorAction Stop |
+                ForEach-Object { $_.Name } |
+                Sort-Object)
+            Assert-OrdinalSequenceEqual -Actual $files -Expected @('AGENTS.append.md', 'overlay.json')
+        }
+    }
+
+    It 'строго разбирает переносимые manifests и проверяет их контракт' {
+        $expectedNames = @('android', 'dotnet', 'dotnet-maui', 'ios', 'web')
+        $semVerPattern = '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$'
+
+        $manifests = @(Get-OverlayManifests)
+        Assert-OrdinalSequenceEqual -Actual @($manifests | ForEach-Object { $_.Directory.Name }) -Expected $expectedNames
+
+        foreach ($entry in $manifests) {
+            $manifest = $entry.Value
+            $properties = @($manifest.PSObject.Properties.Name | Sort-Object)
+            Assert-OrdinalSequenceEqual -Actual $properties -Expected @('displayName', 'name', 'requiredTools', 'targetDirectories', 'verificationCommands', 'version')
+
+            if ($manifest.name -isnot [string] -or -not [System.StringComparer]::Ordinal.Equals($manifest.name, $entry.Directory.Name)) {
+                throw "Manifest '$($entry.Path)' должен содержать name, равное имени каталога."
+            }
+            if ($manifest.displayName -isnot [string] -or [string]::IsNullOrWhiteSpace($manifest.displayName)) {
+                throw "Manifest '$($entry.Path)' должен содержать непустое displayName."
+            }
+            if ($manifest.version -isnot [string] -or $manifest.version -notmatch $semVerPattern) {
+                throw "Manifest '$($entry.Path)' должен содержать строгую SemVer-версию overlay."
+            }
+
+            foreach ($arrayProperty in @('targetDirectories', 'requiredTools', 'verificationCommands')) {
+                $value = $manifest.$arrayProperty
+                if ($value -isnot [System.Array] -or $value.Count -eq 0) {
+                    throw "Manifest '$($entry.Path)' должен содержать непустой массив $arrayProperty."
+                }
+                foreach ($item in $value) {
+                    if ($item -isnot [string] -or [string]::IsNullOrWhiteSpace($item)) {
+                        throw "Manifest '$($entry.Path)' содержит недопустимый элемент $arrayProperty."
+                    }
+                }
+            }
+
+            foreach ($targetDirectory in $manifest.targetDirectories) {
+                Assert-SafeOverlayTargetDirectory -Path $targetDirectory
+            }
+            foreach ($tool in $manifest.requiredTools) {
+                if ($tool -notmatch '^[a-z][a-z0-9-]*$') {
+                    throw "Логическое имя инструмента '$tool' в '$($entry.Path)' недопустимо."
+                }
+            }
+        }
+    }
+
+    It 'не фиксирует версии SDK или runtime в manifests' {
+        foreach ($entry in Get-OverlayManifests) {
+            $content = Get-Content -LiteralPath $entry.Path -Encoding UTF8 -Raw -ErrorAction Stop
+            Assert-TextNotMatches $content '(?im)\b(?:sdk|runtime|dotnet|node(?:js)?|kotlin|swift|gradle|xcode)\s*(?:version\s*)?\d+(?:\.\d+){0,3}\b'
+        }
+    }
+
+    It 'каждый append-файл остаётся русскоязычным дополнением и требует чтения источников истины' {
+        foreach ($entry in Get-OverlayManifests) {
+            $appendPath = Join-Path $entry.Directory.FullName 'AGENTS.append.md'
+            $content = Get-Content -LiteralPath $appendPath -Encoding UTF8 -Raw -ErrorAction Stop
+
+            Assert-TextMatches $content '^---\r?\n'
+            foreach ($marker in @('status: Draft', 'дополняют глобальные правила', 'не отменяют глобальные правила', 'docs/architecture/technology-stack.md', 'активный план', 'docs/status/current.md', 'Не угадывайте', 'production dependency', 'ADR')) {
+                Assert-TextContains $content $marker
+            }
+            foreach ($match in [regex]::Matches($content, '\{\{[^}]+\}\}')) {
+                if ($match.Value -notin @('{{PROJECT_NAME}}', '{{DATE}}', '{{RULES_VERSION}}', '{{RULES_COMMIT}}', '{{CONTENT_HASH}}', '{{OVERLAYS_JSON}}')) {
+                    throw "В '$appendPath' используется неразрешённый токен '$($match.Value)'."
+                }
+            }
+        }
+    }
+
+    It 'dotnet overlay задаёт безопасные базовые проверки' {
+        $entry = @(Get-OverlayManifests | Where-Object { $_.Directory.Name -ceq 'dotnet' })[0]
+        Assert-OrdinalSequenceEqual -Actual @($entry.Value.verificationCommands) -Expected @('dotnet restore', 'dotnet build', 'dotnet test')
+        $content = Get-Content -LiteralPath (Join-Path $entry.Directory.FullName 'AGENTS.append.md') -Encoding UTF8 -Raw -ErrorAction Stop
+        foreach ($marker in @('nullable', 'async', 'cancellation', 'dependency', 'security', 'platform-specific')) {
+            Assert-TextContains $content $marker
+        }
+    }
+
+    It 'web overlay не угадывает package manager и охватывает качество интерфейса' {
+        $entry = @(Get-OverlayManifests | Where-Object { $_.Directory.Name -ceq 'web' })[0]
+        $manifestText = Get-Content -LiteralPath $entry.Path -Encoding UTF8 -Raw -ErrorAction Stop
+        Assert-TextNotMatches $manifestText '(?i)\b(?:npm|pnpm|yarn|bun)\b'
+        $content = Get-Content -LiteralPath (Join-Path $entry.Directory.FullName 'AGENTS.append.md') -Encoding UTF8 -Raw -ErrorAction Stop
+        foreach ($marker in @('package manager', 'lockfile', 'scripts', 'Не угадывайте npm, pnpm, yarn или bun', 'build', 'test', 'lint', 'typecheck', 'accessibility', 'адаптив', 'клавиатур', 'фокус', 'производительность')) {
+            Assert-TextContains $content $marker
+        }
+    }
+
+    It 'android overlay требует только Gradle wrapper проекта' {
+        $entry = @(Get-OverlayManifests | Where-Object { $_.Directory.Name -ceq 'android' })[0]
+        $content = Get-Content -LiteralPath (Join-Path $entry.Directory.FullName 'AGENTS.append.md') -Encoding UTF8 -Raw -ErrorAction Stop
+        foreach ($marker in @('gradlew', 'gradlew.bat', 'не системный Gradle', 'Kotlin', 'Jetpack Compose', 'lifecycle', 'восстановление состояния', 'разрешения', 'coroutines', 'accessibility', 'emulator')) {
+            Assert-TextContains $content $marker
+        }
+    }
+
+    It 'ios overlay соблюдает границу macOS и не угадывает параметры xcodebuild' {
+        $entry = @(Get-OverlayManifests | Where-Object { $_.Directory.Name -ceq 'ios' })[0]
+        $content = Get-Content -LiteralPath (Join-Path $entry.Directory.FullName 'AGENTS.append.md') -Encoding UTF8 -Raw -ErrorAction Stop
+        foreach ($marker in @('xcodebuild', 'macOS', 'Xcode', 'scheme', 'workspace', 'destination', 'Swift', 'SwiftUI', 'concurrency', 'privacy', 'разрешения', 'accessibility', 'Windows', 'нельзя заявлять')) {
+            Assert-TextContains $content $marker
+        }
+    }
+
+    It 'dotnet maui overlay задаёт target-specific проверку и границу iOS' {
+        $entry = @(Get-OverlayManifests | Where-Object { $_.Directory.Name -ceq 'dotnet-maui' })[0]
+        $content = Get-Content -LiteralPath (Join-Path $entry.Directory.FullName 'AGENTS.append.md') -Encoding UTF8 -Raw -ErrorAction Stop
+        foreach ($marker in @('dotnet workload restore', 'target-specific', 'shared', 'platform', 'lifecycle', 'восстановление состояния', 'разрешения', 'async', 'cancellation', 'accessibility', 'macOS', 'Xcode')) {
             Assert-TextContains $content $marker
         }
     }

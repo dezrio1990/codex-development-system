@@ -1,0 +1,15 @@
+{
+  "name": "ios",
+  "displayName": "iOS",
+  "version": "1.0.0",
+  "targetDirectories": [
+    "."
+  ],
+  "requiredTools": [
+    "xcode",
+    "xcodebuild"
+  ],
+  "verificationCommands": [
+    "xcodebuild <параметры scheme/workspace/destination из утверждённого проекта>"
+  ]
+}

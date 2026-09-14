@@ -1,0 +1,16 @@
+{
+  "name": "dotnet-maui",
+  "displayName": ".NET MAUI",
+  "version": "1.0.0",
+  "targetDirectories": [
+    "."
+  ],
+  "requiredTools": [
+    "dotnet-maui-workload",
+    "dotnet-sdk"
+  ],
+  "verificationCommands": [
+    "dotnet workload restore",
+    "dotnet build <утверждённый target-specific target>"
+  ]
+}
