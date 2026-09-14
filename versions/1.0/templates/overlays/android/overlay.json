@@ -1,0 +1,16 @@
+{
+  "name": "android",
+  "displayName": "Android",
+  "version": "1.0.0",
+  "targetDirectories": [
+    "."
+  ],
+  "requiredTools": [
+    "android-sdk",
+    "gradle-wrapper"
+  ],
+  "verificationCommands": [
+    "./gradlew {{GRADLE_TASK}}",
+    ".\\gradlew.bat {{GRADLE_TASK}}"
+  ]
+}

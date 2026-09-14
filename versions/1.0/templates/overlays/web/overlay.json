@@ -1,0 +1,14 @@
+{
+  "name": "web",
+  "displayName": "Веб-приложение",
+  "version": "1.0.0",
+  "targetDirectories": [
+    "."
+  ],
+  "requiredTools": [
+    "package-manager"
+  ],
+  "verificationCommands": [
+    "{{PACKAGE_MANAGER}} run {{SCRIPT}}"
+  ]
+}

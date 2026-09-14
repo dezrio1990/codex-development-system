@@ -1,0 +1,8 @@
+{
+  "source": "https://github.com/dezrio1990/codex-development-system",
+  "version": "1.0",
+  "profiles": [
+    "base",
+    "dotnet"
+  ]
+}

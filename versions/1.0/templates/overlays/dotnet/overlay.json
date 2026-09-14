@@ -1,0 +1,16 @@
+{
+  "name": "dotnet",
+  "displayName": ".NET",
+  "version": "1.0.0",
+  "targetDirectories": [
+    "."
+  ],
+  "requiredTools": [
+    "dotnet-sdk"
+  ],
+  "verificationCommands": [
+    "dotnet restore",
+    "dotnet build",
+    "dotnet test"
+  ]
+}
