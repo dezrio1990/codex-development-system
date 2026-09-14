@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dezrio1990/codex-development-system/schemas/version.schema.json",
+  "title": "Неизменяемая версия правил",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "channel", "gitTag", "gitCommit", "contentHash", "releasedAt"],
+  "properties": {
+    "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$" },
+    "channel": { "const": "stable" },
+    "gitTag": { "type": "string", "pattern": "^v\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$" },
+    "gitCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "contentHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "releasedAt": { "type": "string", "format": "date-time" }
+  }
+}

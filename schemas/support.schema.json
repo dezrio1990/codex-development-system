@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dezrio1990/codex-development-system/schemas/support.schema.json",
+  "title": "Изменяемые статусы поддержки выпусков",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "versions"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "versions": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status"],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["Current", "Supported", "Deprecated", "Unsupported", "Security update required"]
+          },
+          "updatedAt": { "type": "string", "format": "date-time" },
+          "note": { "type": "string" }
+        }
+      }
+    }
+  }
+}

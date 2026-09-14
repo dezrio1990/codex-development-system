@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dezrio1990/codex-development-system/schemas/project-manifest.schema.json",
+  "title": "Манифест установленного набора правил",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "rulesSource", "rulesVersion", "rulesCommit", "releaseContentHash", "installedContentHash", "overlays", "installedAt", "updatedAt"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "rulesSource": { "const": "https://github.com/dezrio1990/codex-development-system" },
+    "rulesVersion": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$" },
+    "rulesCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "releaseContentHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "installedContentHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "overlays": { "type": "array", "items": { "type": "string", "pattern": "^[a-z0-9-]+$" }, "uniqueItems": true },
+    "installedAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" }
+  }
+}
