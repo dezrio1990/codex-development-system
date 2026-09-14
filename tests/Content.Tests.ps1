@@ -507,7 +507,7 @@ Describe 'Платформенные overlays' {
         $expectedCommands = @{
             'android' = @('./gradlew {{GRADLE_TASK}}', '.\gradlew.bat {{GRADLE_TASK}}')
             'dotnet' = @('dotnet restore', 'dotnet build', 'dotnet test')
-            'dotnet-maui' = @('dotnet workload restore', 'dotnet build {{DOTNET_MAUI_TARGET}}')
+            'dotnet-maui' = @('dotnet workload restore', 'dotnet build -f {{DOTNET_MAUI_TARGET}}')
             'ios' = @('xcodebuild {{XCODEBUILD_ARGUMENTS}}')
             'web' = @('{{PACKAGE_MANAGER}} run {{SCRIPT}}')
         }
@@ -596,8 +596,17 @@ Describe 'Платформенные overlays' {
     It 'dotnet maui overlay задаёт target-specific проверку и границу iOS' {
         $entry = @(Get-OverlayManifests | Where-Object { $_.Directory.Name -ceq 'dotnet-maui' })[0]
         $content = Get-Content -LiteralPath (Join-Path $entry.Directory.FullName 'AGENTS.append.md') -Encoding UTF8 -Raw -ErrorAction Stop
-        foreach ($marker in @('dotnet workload restore', 'target-specific', 'shared', 'platform', 'lifecycle', 'восстановление состояния', 'разрешения', 'async', 'cancellation', 'accessibility', 'macOS', 'Xcode')) {
+        foreach ($marker in @('dotnet workload restore', 'target-specific', 'target framework', 'shared', 'platform', 'lifecycle', 'восстановление состояния', 'разрешения', 'async', 'cancellation', 'accessibility', 'macOS', 'Xcode')) {
             Assert-TextContains $content $marker
         }
+    }
+
+    It 'dotnet maui подставляет TFM после ключа -f' {
+        $entry = @(Get-OverlayManifests | Where-Object { $_.Directory.Name -ceq 'dotnet-maui' })[0]
+        $template = @($entry.Value.verificationCommands | Where-Object { $_ -match 'DOTNET_MAUI_TARGET' })[0]
+        $command = $template.Replace('{{DOTNET_MAUI_TARGET}}', 'net9.0-android')
+
+        Assert-Equal $command 'dotnet build -f net9.0-android'
+        Assert-TextMatches $command '^dotnet build -f net9\.0-android$'
     }
 }
