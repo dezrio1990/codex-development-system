@@ -51,7 +51,17 @@ Describe 'Governance.Common' {
     }
 
     It 'отклоняет SemVer с ведущими нулями' {
-        foreach ($invalidVersion in @('01.0.0', '1.01.0', '1.0.00', '1.0.0-01', '1.0.0-alpha.01')) {
+        foreach ($invalidVersion in @(
+            '01.0.0',
+            '1.01.0',
+            '1.0.00',
+            '1.0.0-01',
+            '1.0.0-alpha.01',
+            '1.2٢.3',
+            ('1.2.3' + [char]10),
+            ('1.2.3' + [char]13),
+            ('1.2.3' + [char]13 + [char]10)
+        )) {
             Assert-Throws { Get-GovernanceVersionPath -RepositoryRoot $repositoryRoot -Version $invalidVersion }
         }
     }
@@ -74,7 +84,17 @@ Describe 'Governance.Common' {
         )
 
         foreach ($pattern in $patterns) {
-            foreach ($invalidVersion in @('01.0.0', '1.01.0', '1.0.00', '1.0.0-01', '1.0.0-alpha.01')) {
+            foreach ($invalidVersion in @(
+                '01.0.0',
+                '1.01.0',
+                '1.0.00',
+                '1.0.0-01',
+                '1.0.0-alpha.01',
+                '1.2٢.3',
+                ('1.2.3' + [char]10),
+                ('1.2.3' + [char]13),
+                ('1.2.3' + [char]13 + [char]10)
+            )) {
                 if ($invalidVersion -match $pattern) {
                     throw "Схема принимает недопустимую версию '$invalidVersion'."
                 }
@@ -87,7 +107,16 @@ Describe 'Governance.Common' {
         }
 
         $gitTagPattern = $versionSchema.properties.gitTag.pattern
-        foreach ($invalidTag in @('v01.0.0', 'v1.01.0', 'v1.0.00', 'v1.0.0-01')) {
+        foreach ($invalidTag in @(
+            'v01.0.0',
+            'v1.01.0',
+            'v1.0.00',
+            'v1.0.0-01',
+            'v1.2٢.3',
+            ('v1.2.3' + [char]10),
+            ('v1.2.3' + [char]13),
+            ('v1.2.3' + [char]13 + [char]10)
+        )) {
             if ($invalidTag -match $gitTagPattern) {
                 throw "Схема принимает недопустимый Git-тег '$invalidTag'."
             }

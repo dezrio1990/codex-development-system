@@ -6,9 +6,9 @@
   "additionalProperties": false,
   "required": ["version", "channel", "gitTag", "gitCommit", "contentHash", "releasedAt"],
   "properties": {
-    "version": { "type": "string", "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(-((0|[1-9]\\d*)|(\\d*[A-Za-z-][0-9A-Za-z-]*))(\\.((0|[1-9]\\d*)|(\\d*[A-Za-z-][0-9A-Za-z-]*)))*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$" },
+    "version": { "type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*)|([0-9]*[A-Za-z-][0-9A-Za-z-]*))(\\.((0|[1-9][0-9]*)|([0-9]*[A-Za-z-][0-9A-Za-z-]*)))*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$(?![\\s\\S])" },
     "channel": { "const": "stable" },
-    "gitTag": { "type": "string", "pattern": "^v(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(-((0|[1-9]\\d*)|(\\d*[A-Za-z-][0-9A-Za-z-]*))(\\.((0|[1-9]\\d*)|(\\d*[A-Za-z-][0-9A-Za-z-]*)))*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$" },
+    "gitTag": { "type": "string", "pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*)|([0-9]*[A-Za-z-][0-9A-Za-z-]*))(\\.((0|[1-9][0-9]*)|([0-9]*[A-Za-z-][0-9A-Za-z-]*)))*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$(?![\\s\\S])" },
     "gitCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
     "contentHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "releasedAt": { "type": "string", "format": "date-time" }

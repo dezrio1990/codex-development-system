@@ -8,7 +8,7 @@
   "properties": {
     "schemaVersion": { "type": "integer", "const": 1 },
     "rulesSource": { "const": "https://github.com/dezrio1990/codex-development-system" },
-    "rulesVersion": { "type": "string", "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(-((0|[1-9]\\d*)|(\\d*[A-Za-z-][0-9A-Za-z-]*))(\\.((0|[1-9]\\d*)|(\\d*[A-Za-z-][0-9A-Za-z-]*)))*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$" },
+    "rulesVersion": { "type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*)|([0-9]*[A-Za-z-][0-9A-Za-z-]*))(\\.((0|[1-9][0-9]*)|([0-9]*[A-Za-z-][0-9A-Za-z-]*)))*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$(?![\\s\\S])" },
     "rulesCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
     "releaseContentHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "installedContentHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
