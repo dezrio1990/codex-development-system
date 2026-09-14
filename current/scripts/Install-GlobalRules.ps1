@@ -4,7 +4,8 @@ param(
     [Parameter(Mandatory = $true)][string]$Version,
     [Parameter(Mandatory = $true)][string]$CodexHome,
     # Скрытый seam только для детерминированных тестов гонки; в обычном CLI не используется.
-    [Parameter(DontShow = $true)][scriptblock]$TestBeforeApply
+    [Parameter(DontShow = $true)][scriptblock]$TestBeforeApply,
+    [Parameter(DontShow = $true)][scriptblock]$TestBeforeExistingMove
 )
 
 Set-StrictMode -Version Latest
@@ -274,42 +275,44 @@ function Assert-PlannedFileState {
     }
 }
 
-function Write-AtomicBytes {
-    param(
-        [Parameter(Mandatory = $true)][string]$Destination,
-        [Parameter(Mandatory = $true)][byte[]]$Bytes,
-        [switch]$RequireAbsent,
-        [AllowEmptyCollection()][byte[]]$ExpectedBytes
-    )
+function Write-PlannedBytes {
+    param([Parameter(Mandatory = $true)]$Operation, [scriptblock]$TestBeforeExistingMove)
 
-    $directory = Split-Path -Parent $Destination
-    $temporary = Join-Path $directory ('.codex-development-system.tmp-' + [guid]::NewGuid().ToString('N'))
+    $temporary = Join-Path (Split-Path -Parent $Operation.Target) ('.codex-development-system.tmp-' + [guid]::NewGuid().ToString('N'))
+    $preserveTemporary = $false
     try {
-        [System.IO.File]::WriteAllBytes($temporary, $Bytes)
-        if (Test-Path -LiteralPath $Destination) {
-            if ($RequireAbsent) {
-                throw "Файл появился после построения плана; остановлено для перепланирования: $Destination"
-            }
-            if ($PSBoundParameters.ContainsKey('ExpectedBytes') -and -not (Test-ByteSequenceEqual -Left ([System.IO.File]::ReadAllBytes($Destination)) -Right $ExpectedBytes)) {
-                throw "Файл назначения изменился перед заменой; остановлено для перепланирования: $Destination"
-            }
-            # Резервная копия создаётся вызывающим кодом до замены. В Windows
-            # File.Copy с overwrite поддерживает PS 5.1 без зависимости от
-            # File.Replace, которая недоступна на части файловых систем.
-            [System.IO.File]::Copy($temporary, $Destination, $true)
-            Remove-Item -LiteralPath $temporary -Force -ErrorAction Stop
+        [System.IO.File]::WriteAllBytes($temporary, $Operation.Bytes)
+        Assert-PlannedFileState -Operation $Operation
+        if (-not $Operation.ExpectedExists) {
+            [System.IO.File]::Move($temporary, $Operation.Target)
+            return
         }
-        else {
-            [System.IO.File]::Move($temporary, $Destination)
+        if ($null -ne $TestBeforeExistingMove) { & $TestBeforeExistingMove }
+        Assert-NoReparsePoint -Path $Operation.Target
+        Assert-NoReparsePoint -Path $Operation.Backup
+        [System.IO.File]::Move($Operation.Target, $Operation.Backup)
+        try { $movedBytes = [System.IO.File]::ReadAllBytes($Operation.Backup) }
+        catch { $preserveTemporary = $true; throw "Невозможно проверить moved backup; recovery backup: $($Operation.Backup); staged file: $temporary" }
+        if (-not (Test-ByteSequenceEqual -Left $movedBytes -Right $Operation.ExpectedBytes)) {
+            $preserveTemporary = $true
+            if (-not (Test-Path -LiteralPath $Operation.Target)) {
+                try { [System.IO.File]::Move($Operation.Backup, $Operation.Target) }
+                catch { throw "Файл изменился перед переносом; recovery backup: $($Operation.Backup); staged file: $temporary" }
+                $preserveTemporary = $false
+                throw "Файл изменился перед переносом; пользовательские данные восстановлены: $($Operation.Target)"
+            }
+            throw "Файл изменился перед переносом; recovery backup: $($Operation.Backup); concurrent target: $($Operation.Target); staged file: $temporary"
         }
+        if (Test-Path -LiteralPath $Operation.Target) {
+            $preserveTemporary = $true
+            throw "Новый файл появился перед заменой; recovery backup: $($Operation.Backup); concurrent target: $($Operation.Target); staged file: $temporary"
+        }
+        Assert-NoReparsePoint -Path $Operation.Target
+        [System.IO.File]::Move($temporary, $Operation.Target)
     }
-    catch {
-        throw "Не удалось безопасно записать '$Destination'. Исходный файл не заменён без успешного завершения операции: $($_.Exception.Message)"
-    }
+    catch { throw "Не удалось безопасно применить '$($Operation.Target)': $($_.Exception.Message)" }
     finally {
-        if (Test-Path -LiteralPath $temporary) {
-            Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
-        }
+        if (-not $preserveTemporary -and (Test-Path -LiteralPath $temporary)) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
     }
 }
 
@@ -335,11 +338,6 @@ function Get-VerifiedSnapshot {
         $agents[$name] = $path
     }
 
-    $agentsFileNames = @(Get-ChildItem -LiteralPath $agentsPath -File -Filter '*.toml' -ErrorAction Stop | ForEach-Object { $_.Name })
-    if ($agentsFileNames.Count -lt $expectedAgentNames.Count) {
-        throw "Опубликованный snapshot версии $RequestedVersion неполон: найдено менее девяти TOML-ролей."
-    }
-
     $agentsRulesPath = Join-Path $globalPath 'AGENTS.md'
     if (-not (Test-Path -LiteralPath $agentsRulesPath -PathType Leaf)) {
         throw "Опубликованный snapshot версии $RequestedVersion неполон: не найден global/AGENTS.md."
@@ -358,9 +356,6 @@ if (-not (Test-Path -LiteralPath $repositoryPath -PathType Container)) {
 
 $snapshot = Get-VerifiedSnapshot -RepositoryPath $repositoryPath -RequestedVersion $Version
 $codexHomePath = Assert-SafeCodexHome -Path $CodexHome -RepositoryPath $repositoryPath
-if (Test-PathInside -Candidate $codexHomePath -Container (Split-Path -Parent $snapshot.AgentsRulesPath)) {
-    throw "Опасная цель CodexHome: нельзя устанавливать внутри исходного snapshot: $CodexHome"
-}
 $agentsDestinationPath = [System.IO.Path]::GetFullPath((Join-Path $codexHomePath 'agents'))
 $agentsRulesDestination = [System.IO.Path]::GetFullPath((Join-Path $codexHomePath 'AGENTS.md'))
 Assert-NoReparsePoint -Path $agentsDestinationPath
@@ -466,20 +461,13 @@ try {
     Assert-NoReparsePoint -Path $agentsDestinationPath
 
     foreach ($operation in $plan | Where-Object { $_.Kind -eq 'WriteManagedRules' }) {
-        Assert-PlannedFileState -Operation $operation
-        if ($null -ne $operation.Backup) {
-            [System.IO.File]::Copy($operation.Target, $operation.Backup, $false)
-        }
-        Write-AtomicBytes -Destination $operation.Target -Bytes $operation.Bytes -RequireAbsent:(-not $operation.ExpectedExists) -ExpectedBytes $operation.ExpectedBytes
+        Write-PlannedBytes -Operation $operation -TestBeforeExistingMove $TestBeforeExistingMove
     }
     foreach ($operation in $plan | Where-Object { $_.Kind -eq 'AddAgent' }) {
-        Assert-PlannedFileState -Operation $operation
-        Write-AtomicBytes -Destination $operation.Target -Bytes $operation.Bytes -RequireAbsent
+        Write-PlannedBytes -Operation $operation
     }
     foreach ($operation in $plan | Where-Object { $_.Kind -eq 'ReplaceAgent' }) {
-        Assert-PlannedFileState -Operation $operation
-        [System.IO.File]::Copy($operation.Target, $operation.Backup, $false)
-        Write-AtomicBytes -Destination $operation.Target -Bytes $operation.Bytes -ExpectedBytes $operation.ExpectedBytes
+        Write-PlannedBytes -Operation $operation -TestBeforeExistingMove $TestBeforeExistingMove
     }
 }
 catch {

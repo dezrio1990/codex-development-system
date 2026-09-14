@@ -46,7 +46,8 @@ function Invoke-GlobalInstaller {
         [Parameter(Mandatory = $true)][string]$RepositoryRoot,
         [Parameter(Mandatory = $true)][string]$CodexHome,
         [switch]$WhatIf,
-        [scriptblock]$TestBeforeApply
+        [scriptblock]$TestBeforeApply,
+        [scriptblock]$TestBeforeExistingMove
     )
 
     if ($WhatIf) {
@@ -54,10 +55,12 @@ function Invoke-GlobalInstaller {
         return
     }
 
-    if ($null -ne $TestBeforeApply) {
-        & $InstallerPath -RepositoryRoot $RepositoryRoot -Version '1.0.0' -CodexHome $CodexHome -TestBeforeApply $TestBeforeApply
+    if ($null -ne $TestBeforeApply -and $null -ne $TestBeforeExistingMove) {
+        & $InstallerPath -RepositoryRoot $RepositoryRoot -Version '1.0.0' -CodexHome $CodexHome -TestBeforeApply $TestBeforeApply -TestBeforeExistingMove $TestBeforeExistingMove
         return
     }
+    if ($null -ne $TestBeforeApply) { & $InstallerPath -RepositoryRoot $RepositoryRoot -Version '1.0.0' -CodexHome $CodexHome -TestBeforeApply $TestBeforeApply; return }
+    if ($null -ne $TestBeforeExistingMove) { & $InstallerPath -RepositoryRoot $RepositoryRoot -Version '1.0.0' -CodexHome $CodexHome -TestBeforeExistingMove $TestBeforeExistingMove; return }
 
     & $InstallerPath -RepositoryRoot $RepositoryRoot -Version '1.0.0' -CodexHome $CodexHome
 }
@@ -361,6 +364,55 @@ Describe 'Безопасная глобальная установка' {
             Assert-BytesEqual ([System.IO.File]::ReadAllBytes($destination)) $userBytes
             Assert-Equal (Test-Path -LiteralPath (Join-Path $codexHome 'agents')) $false
             Assert-Equal (@(Get-ChildItem -LiteralPath $codexHome -Filter '*.backup-*' -File).Count) 0
+        }
+        finally {
+            Remove-InstallFixture $fixture
+        }
+    }
+
+    It 'восстанавливает отредактированный AGENTS.md вместо его перезаписи после финальной проверки' {
+        $fixture = New-InstallFixture
+        try {
+            $codexHome = Get-InstallCodexHome $fixture
+            New-Item -ItemType Directory -Path $codexHome -Force | Out-Null
+            $destination = Join-Path $codexHome 'AGENTS.md'
+            $plannedBytes = [System.Text.UTF8Encoding]::new($false).GetBytes('agents before final check')
+            $editedBytes = [System.Text.UTF8Encoding]::new($false).GetBytes('agents edited after final check')
+            [System.IO.File]::WriteAllBytes($destination, $plannedBytes)
+
+            Assert-Throws {
+                Invoke-GlobalInstaller -RepositoryRoot $fixture -CodexHome $codexHome -TestBeforeExistingMove {
+                    [System.IO.File]::WriteAllBytes($destination, $editedBytes)
+                }
+            } 'восстановлен|recovery'
+
+            Assert-BytesEqual ([System.IO.File]::ReadAllBytes($destination)) $editedBytes
+            Assert-Equal (@(Get-ChildItem -LiteralPath $codexHome -Filter '*.backup-*' -File).Count) 0
+        }
+        finally {
+            Remove-InstallFixture $fixture
+        }
+    }
+
+    It 'восстанавливает отредактированную известную TOML-роль вместо её перезаписи после финальной проверки' {
+        $fixture = New-InstallFixture
+        try {
+            $codexHome = Get-InstallCodexHome $fixture
+            $agentsPath = Join-Path $codexHome 'agents'
+            New-Item -ItemType Directory -Path $agentsPath -Force | Out-Null
+            $destination = Join-Path $agentsPath 'android_developer.toml'
+            $plannedBytes = [System.Text.UTF8Encoding]::new($false).GetBytes('role before final check')
+            $editedBytes = [System.Text.UTF8Encoding]::new($false).GetBytes('role edited after final check')
+            [System.IO.File]::WriteAllBytes($destination, $plannedBytes)
+
+            Assert-Throws {
+                Invoke-GlobalInstaller -RepositoryRoot $fixture -CodexHome $codexHome -TestBeforeExistingMove {
+                    [System.IO.File]::WriteAllBytes($destination, $editedBytes)
+                }
+            } 'восстановлен|recovery'
+
+            Assert-BytesEqual ([System.IO.File]::ReadAllBytes($destination)) $editedBytes
+            Assert-Equal (@(Get-ChildItem -LiteralPath $agentsPath -Filter 'android_developer.toml.backup-*' -File).Count) 0
         }
         finally {
             Remove-InstallFixture $fixture
