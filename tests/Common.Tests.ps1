@@ -58,6 +58,10 @@ Describe 'Governance.Common' {
             '1.0.0-01',
             '1.0.0-alpha.01',
             '1.2٢.3',
+            '1.2.3-K',
+            '1.2.3-İ',
+            '1.2.3+K',
+            '1.2.3+İ',
             ('1.2.3' + [char]10),
             ('1.2.3' + [char]13),
             ('1.2.3' + [char]13 + [char]10)
@@ -91,16 +95,20 @@ Describe 'Governance.Common' {
                 '1.0.0-01',
                 '1.0.0-alpha.01',
                 '1.2٢.3',
+                '1.2.3-K',
+                '1.2.3-İ',
+                '1.2.3+K',
+                '1.2.3+İ',
                 ('1.2.3' + [char]10),
                 ('1.2.3' + [char]13),
                 ('1.2.3' + [char]13 + [char]10)
             )) {
-                if ($invalidVersion -match $pattern) {
+                if ($invalidVersion -cmatch $pattern) {
                     throw "Схема принимает недопустимую версию '$invalidVersion'."
                 }
             }
             foreach ($validVersion in @('0.0.0', '1.2.3-rc.1', '1.2.3-alpha.1+build.5')) {
-                if ($validVersion -notmatch $pattern) {
+                if ($validVersion -cnotmatch $pattern) {
                     throw "Схема отклоняет допустимую версию '$validVersion'."
                 }
             }
@@ -113,15 +121,19 @@ Describe 'Governance.Common' {
             'v1.0.00',
             'v1.0.0-01',
             'v1.2٢.3',
+            'v1.2.3-K',
+            'v1.2.3-İ',
+            'v1.2.3+K',
+            'v1.2.3+İ',
             ('v1.2.3' + [char]10),
             ('v1.2.3' + [char]13),
             ('v1.2.3' + [char]13 + [char]10)
         )) {
-            if ($invalidTag -match $gitTagPattern) {
+            if ($invalidTag -cmatch $gitTagPattern) {
                 throw "Схема принимает недопустимый Git-тег '$invalidTag'."
             }
         }
-        if ('v1.2.3-alpha.1+build.5' -notmatch $gitTagPattern) {
+        if ('v1.2.3-alpha.1+build.5' -cnotmatch $gitTagPattern) {
             throw 'Схема отклоняет допустимый Git-тег.'
         }
     }

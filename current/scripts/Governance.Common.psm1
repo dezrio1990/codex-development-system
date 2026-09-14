@@ -79,7 +79,7 @@ function Get-GovernanceVersionPath {
         [Parameter(Mandatory = $true)][string]$Version
     )
 
-    if ($Version -notmatch $script:SemVerPattern) {
+    if ($Version -cnotmatch $script:SemVerPattern) {
         throw "Версия должна быть SemVer без сегментов пути: $Version"
     }
 
