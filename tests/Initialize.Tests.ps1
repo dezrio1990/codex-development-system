@@ -77,6 +77,16 @@ function Get-ProjectManifest {
     return (Get-Content -LiteralPath (Join-Path $Fixture.Project '.codex/governance/manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json)
 }
 
+function Set-JsonStringProperty {
+    param([string]$Path, [string]$Property, [string]$Value)
+
+    $text = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
+    $pattern = '"' + [regex]::Escape($Property) + '"\s*:\s*"(?:[^"\\]|\\.)*"'
+    if ([regex]::Matches($text, $pattern).Count -ne 1) { throw "Не найден единственный JSON string property $Property." }
+    $replacement = '"' + $Property + '": "' + $Value + '"'
+    [System.IO.File]::WriteAllBytes($Path, $Utf8.GetBytes(([regex]::Replace($text, $pattern, $replacement, 1))))
+}
+
 Describe 'Инициализация прикладного проекта из закреплённого выпуска' {
     It 'preview не изменяет чистый или конфликтующий проект' {
         $fixture = New-InitializeFixture
@@ -315,5 +325,52 @@ Describe 'Инициализация прикладного проекта из 
             Assert-Equal (@(Get-ChildItem -LiteralPath $fixture.Project -Recurse -Force -Filter '.governance.tmp-*' -File).Count) 0
         }
         finally { Remove-InitializeFixture $fixture }
+    }
+
+    It 'отклоняет raw invalid и over-precision releasedAt до записи при self-consistent выпуске' {
+        foreach ($value in @('2026-09-14T00:00:00+99:99', '2026-09-14T00:00:00.12345678Z')) {
+            $fixture = New-InitializeFixture
+            try {
+                Set-JsonStringProperty -Path (Join-Path $fixture.Release 'version.json') -Property 'releasedAt' -Value $value
+                $before = Get-TreeFingerprint $fixture.Project
+
+                Assert-Throws { Invoke-Initializer -Fixture $fixture -Apply } 'releasedAt|date|дата|RFC3339'
+
+                Assert-Equal (Get-TreeFingerprint $fixture.Project) $before
+            }
+            finally { Remove-InitializeFixture $fixture }
+        }
+    }
+
+    It 'принимает raw releasedAt с Z и +00:00 в portable subset' {
+        foreach ($value in @('2026-09-14T00:00:00Z', '2026-09-14T00:00:00+00:00')) {
+            $fixture = New-InitializeFixture
+            try {
+                Set-JsonStringProperty -Path (Join-Path $fixture.Release 'version.json') -Property 'releasedAt' -Value $value
+
+                Invoke-Initializer -Fixture $fixture | Out-Null
+
+                Assert-Equal (Test-Path -LiteralPath (Join-Path $fixture.Project '.codex')) $false
+            }
+            finally { Remove-InitializeFixture $fixture }
+        }
+    }
+
+    It 'маршрутизирует raw invalid и over-precision manifest dates к Sync без записи' {
+        foreach ($value in @('2026-09-14T00:00:00+99:99', '2026-09-14T00:00:00.12345678Z')) {
+            $fixture = New-InitializeFixture
+            try {
+                Invoke-Initializer -Fixture $fixture -Apply | Out-Null
+                $manifestPath = Join-Path $fixture.Project '.codex/governance/manifest.json'
+                Set-JsonStringProperty -Path $manifestPath -Property 'installedAt' -Value $value
+                Set-JsonStringProperty -Path $manifestPath -Property 'updatedAt' -Value $value
+                $before = Get-TreeFingerprint $fixture.Project
+
+                Assert-Throws { Invoke-Initializer -Fixture $fixture -Apply } 'Sync-ProjectRules'
+
+                Assert-Equal (Get-TreeFingerprint $fixture.Project) $before
+            }
+            finally { Remove-InitializeFixture $fixture }
+        }
     }
 }

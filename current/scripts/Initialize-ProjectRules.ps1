@@ -83,10 +83,28 @@ function Assert-StrictProperties {
 
 function Assert-Rfc3339DateTime {
     param($Value, [string]$Description)
-    $text = if ($Value -is [DateTime]) { $Value.ToString('o', [Globalization.CultureInfo]::InvariantCulture) } elseif ($Value -is [string]) { $Value } else { $null }
-    if ($text -isnot [string] -or $text -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,7})?(Z|[+-]\d{2}:\d{2})$') { throw "$Description должен быть RFC3339 date-time с timezone." }
-    try { [DateTimeOffset]::Parse($text, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) | Out-Null }
+    if ($Value -isnot [string] -or $Value -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,7})?(Z|[+-]\d{2}:\d{2})$') { throw "$Description должен быть RFC3339 date-time с timezone и 1–7 знаками дробной секунды." }
+    if (-not $Value.EndsWith('Z', [StringComparison]::Ordinal)) {
+        $offset = $Value.Substring($Value.Length - 6)
+        $hours = [int]$offset.Substring(1, 2)
+        $minutes = [int]$offset.Substring(4, 2)
+        if ($hours -gt 14 -or $minutes -gt 59 -or ($hours -eq 14 -and $minutes -ne 0)) { throw "$Description содержит недопустимый timezone offset." }
+    }
+    try { [DateTimeOffset]::Parse($Value, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) | Out-Null }
     catch { throw "$Description содержит невозможную дату." }
+}
+
+function Get-RawJsonDateString {
+    param([string]$Json, [string]$Property, [string]$Description)
+    # Консервативный portable subset: generated metadata не нуждается в JSON escapes.
+    # Их запрет не даёт alternate/escaped property names обойти проверку исходных байтов.
+    if ($Json.Contains([char]92)) { throw "$Description не допускает JSON escape-последовательности." }
+    $propertyToken = '"' + [regex]::Escape($Property) + '"'
+    if ([regex]::Matches($Json, $propertyToken).Count -ne 1) { throw "$Description должен встретиться в исходном JSON ровно один раз." }
+    $valuePattern = $propertyToken + '\s*:\s*"([^"\\]*)"'
+    $match = [regex]::Match($Json, $valuePattern)
+    if (-not $match.Success) { throw "$Description должен быть plain JSON string token." }
+    return $match.Groups[1].Value
 }
 
 function Get-PortableRelativePath {
@@ -130,14 +148,16 @@ function Get-VerifiedRelease {
     $versionPath = Join-Path $release.FullName 'version.json'
     $checksumsPath = Join-Path $release.FullName 'checksums.sha256'
     if (-not (Test-Path -LiteralPath $versionPath -PathType Leaf) -or -not (Test-Path -LiteralPath $checksumsPath -PathType Leaf)) { throw 'Выпуск не содержит version.json или checksums.sha256.' }
-    try { $metadata = Get-Content -LiteralPath $versionPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop }
+    $versionJson = Get-Content -LiteralPath $versionPath -Raw -Encoding UTF8
+    $rawReleasedAt = Get-RawJsonDateString $versionJson 'releasedAt' 'version.json.releasedAt'
+    try { $metadata = $versionJson | ConvertFrom-Json -ErrorAction Stop }
     catch { throw "Некорректный version.json: $($_.Exception.Message)" }
     Assert-StrictProperties $metadata @('version', 'channel', 'gitTag', 'gitCommit', 'contentHash', 'releasedAt') 'version.json'
     if ($metadata.version -isnot [string] -or $metadata.version -cne $RequestedVersion -or $metadata.version -cnotmatch $semVerPattern) { throw 'version.json содержит неверную версию.' }
     if ($metadata.channel -isnot [string] -or $metadata.channel -cne 'stable' -or $metadata.gitTag -isnot [string] -or $metadata.gitTag -cne ('v' + $RequestedVersion)) { throw 'version.json содержит неверный channel или gitTag.' }
     if ($metadata.gitCommit -isnot [string] -or $metadata.gitCommit -cnotmatch '^[0-9a-f]{40}$') { throw 'version.json содержит неверный gitCommit.' }
     if ($metadata.contentHash -isnot [string] -or $metadata.contentHash -cnotmatch '^[0-9a-f]{64}$') { throw 'version.json содержит неверный contentHash.' }
-    Assert-Rfc3339DateTime $metadata.releasedAt 'version.json.releasedAt'
+    Assert-Rfc3339DateTime $rawReleasedAt 'version.json.releasedAt'
     $actualHash = Get-GovernanceContentHash -RootPath $release.FullName
     if ($actualHash -cne $metadata.contentHash) { throw 'Content hash выпуска не совпадает с version.json.' }
     $expectedChecksums = @(Get-GovernanceChecksums -RootPath $release.FullName)
@@ -222,7 +242,12 @@ function Test-CurrentPin {
     param([string]$Project, $Release, [string[]]$Overlays)
     $manifestPath = Join-Path $Project '.codex/governance/manifest.json'
     if (-not (Test-Path -LiteralPath $manifestPath)) { return $false }
-    try { $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop }
+    $manifestJson = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8
+    try {
+        $rawInstalledAt = Get-RawJsonDateString $manifestJson 'installedAt' 'manifest.installedAt'
+        $rawUpdatedAt = Get-RawJsonDateString $manifestJson 'updatedAt' 'manifest.updatedAt'
+        $manifest = $manifestJson | ConvertFrom-Json -ErrorAction Stop
+    }
     catch { throw 'Существующий manifest malformed. Используйте Sync-ProjectRules.ps1.' }
     try {
         Assert-StrictProperties $manifest @('schemaVersion', 'rulesSource', 'rulesVersion', 'rulesCommit', 'releaseContentHash', 'installedContentHash', 'overlays', 'installedAt', 'updatedAt') 'manifest'
@@ -231,8 +256,8 @@ function Test-CurrentPin {
         $currentOverlays = @($manifest.overlays)
         if ($manifest.overlays -isnot [System.Array]) { throw 'manifest.overlays должен быть JSON-массивом' }
         if ($manifest.rulesCommit -cnotmatch '^[0-9a-f]{40}$' -or $manifest.releaseContentHash -cnotmatch '^[0-9a-f]{64}$' -or $manifest.installedContentHash -isnot [string] -or $manifest.installedContentHash -cnotmatch '^[0-9a-f]{64}$') { throw 'manifest имеет неверные hash-поля' }
-        Assert-Rfc3339DateTime $manifest.installedAt 'manifest.installedAt'
-        Assert-Rfc3339DateTime $manifest.updatedAt 'manifest.updatedAt'
+        Assert-Rfc3339DateTime $rawInstalledAt 'manifest.installedAt'
+        Assert-Rfc3339DateTime $rawUpdatedAt 'manifest.updatedAt'
         $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
         foreach ($name in $currentOverlays) { if ($name -isnot [string] -or $name -cnotmatch '^[a-z0-9-]+$' -or -not $seen.Add($name)) { throw 'manifest имеет неверный или повторный overlay' } }
         if ($currentOverlays.Count -ne $Overlays.Count) { throw 'overlay отличается' }
