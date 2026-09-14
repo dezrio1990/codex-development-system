@@ -80,6 +80,30 @@ Describe 'Глобальные правила и роли' {
         }
     }
 
+    It 'требует согласования интеграции и сохраняет границы делегирования' {
+        $rules = Get-Content -LiteralPath $GlobalRulesPath -Encoding UTF8 -Raw -ErrorAction Stop
+
+        foreach ($requiredText in @(
+            'явного утверждения пользователя перед интеграцией или слиянием существенных изменений',
+            'Главный агент может делегировать работу в рамках утверждённого этапа',
+            'матрице ролей',
+            'Субагент не создаёт дальнейших субагентов без явного разрешения'
+        )) {
+            Assert-TextContains $rules $requiredText
+        }
+    }
+
+    It 'требует русское сопровождение обязательного английского публичного документа' {
+        $rules = Get-Content -LiteralPath $GlobalRulesPath -Encoding UTF8 -Raw -ErrorAction Stop
+
+        foreach ($requiredText in @(
+            'публичный или внешний документ необходимо вести на английском',
+            'русское резюме, русский комментарий или связанная русская версия'
+        )) {
+            Assert-TextContains $rules $requiredText
+        }
+    }
+
     It 'каждая роль содержит обязательные поля и процессные обязанности' {
         $files = @(Get-ChildItem -LiteralPath $AgentsPath -Filter '*.toml' -File -ErrorAction Stop)
         foreach ($file in $files) {
@@ -120,6 +144,24 @@ Describe 'Глобальные правила и роли' {
             $role = Get-RoleToml -Path (Join-Path $AgentsPath "$roleName.toml")
             if ($role.ContainsKey('sandbox_mode') -and $role['sandbox_mode'] -eq 'read-only') {
                 throw "Роль реализации '$roleName' ошибочно объявлена read-only."
+            }
+        }
+    }
+
+    It 'содержит профессиональные контракты для ключевых ролей' {
+        $requiredMarkersByRole = @{
+            'android_developer' = @('Kotlin', 'Jetpack Compose', 'lifecycle', 'восстановление состояния', 'разрешения', 'coroutines', 'конкурентность', 'accessibility', 'тесты', 'производительность', 'готовность к релизу')
+            'ios_developer' = @('Swift', 'SwiftUI', 'UIKit', 'lifecycle', 'восстановление состояния', 'разрешения', 'privacy', 'Swift concurrency', 'accessibility', 'тесты', 'производительность', 'App Store')
+            'dotnet_maui_developer' = @('C#', 'XAML', 'интеграций Android и iOS', 'lifecycle', 'восстановление состояния', 'разрешения', 'async', 'отмен', 'accessibility', 'тесты', 'macOS/Xcode', 'непроверенные утверждения')
+            'frontend_developer' = @('семантический HTML', 'accessibility', 'адаптивные состояния', 'клавиатур', 'фокус', 'состояние клиента', 'получение данных', 'состояния ошибок', 'производительность', 'тесты')
+            'backend_architect' = @('границ', 'API', 'данн', 'аутентификац', 'безопасност', 'транзакц', 'конкурентн', 'идемпотентн', 'масштабирован', 'наблюдаемост', 'миграци', 'откат', 'артефакты проектирования', 'без изменения реализации')
+            'code_reviewer' = @('корректность', 'безопасность', 'регрессии', 'недостающие тесты', 'серьёзность', 'файл и строка', 'триггер', 'влияние', 'направление исправления', 'проверенные факты', 'предположения', 'без внесения изменений')
+        }
+
+        foreach ($roleName in $requiredMarkersByRole.Keys) {
+            $role = Get-RoleToml -Path (Join-Path $AgentsPath "$roleName.toml")
+            foreach ($marker in $requiredMarkersByRole[$roleName]) {
+                Assert-TextContains $role['developer_instructions'] $marker
             }
         }
     }
