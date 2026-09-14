@@ -1,0 +1,4 @@
+.worktrees/
+.superpowers/
+*.backup-*
+TestResults/
