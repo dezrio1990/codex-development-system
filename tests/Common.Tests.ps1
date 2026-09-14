@@ -1,4 +1,4 @@
-$repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+﻿$repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $modulePath = Join-Path $repositoryRoot 'current/scripts/Governance.Common.psm1'
 
 if (Test-Path -LiteralPath $modulePath) {
@@ -50,6 +50,53 @@ Describe 'Governance.Common' {
         Assert-Throws { Get-GovernanceVersionPath -RepositoryRoot $repositoryRoot -Version '..\outside' }
     }
 
+    It 'отклоняет SemVer с ведущими нулями' {
+        foreach ($invalidVersion in @('01.0.0', '1.01.0', '1.0.00', '1.0.0-01', '1.0.0-alpha.01')) {
+            Assert-Throws { Get-GovernanceVersionPath -RepositoryRoot $repositoryRoot -Version $invalidVersion }
+        }
+    }
+
+    It 'принимает корректные SemVer prerelease и build metadata' {
+        foreach ($validVersion in @('0.0.0', '1.2.3-rc.1', '1.2.3-alpha.1+build.5', '10.20.30-0A-.-beta+exp.sha.5114f85')) {
+            $path = Get-GovernanceVersionPath -RepositoryRoot $repositoryRoot -Version $validVersion
+            Assert-Equal $path.Name $validVersion
+        }
+    }
+
+    It 'схемы используют строгий SemVer 2.0' {
+        $versionSchema = Get-Content -LiteralPath (Join-Path $repositoryRoot 'schemas/version.schema.json') -Raw | ConvertFrom-Json
+        $manifestSchema = Get-Content -LiteralPath (Join-Path $repositoryRoot 'schemas/project-manifest.schema.json') -Raw | ConvertFrom-Json
+        $supportSchema = Get-Content -LiteralPath (Join-Path $repositoryRoot 'schemas/support.schema.json') -Raw | ConvertFrom-Json
+        $patterns = @(
+            $versionSchema.properties.version.pattern,
+            $manifestSchema.properties.rulesVersion.pattern,
+            $supportSchema.properties.versions.propertyNames.pattern
+        )
+
+        foreach ($pattern in $patterns) {
+            foreach ($invalidVersion in @('01.0.0', '1.01.0', '1.0.00', '1.0.0-01', '1.0.0-alpha.01')) {
+                if ($invalidVersion -match $pattern) {
+                    throw "Схема принимает недопустимую версию '$invalidVersion'."
+                }
+            }
+            foreach ($validVersion in @('0.0.0', '1.2.3-rc.1', '1.2.3-alpha.1+build.5')) {
+                if ($validVersion -notmatch $pattern) {
+                    throw "Схема отклоняет допустимую версию '$validVersion'."
+                }
+            }
+        }
+
+        $gitTagPattern = $versionSchema.properties.gitTag.pattern
+        foreach ($invalidTag in @('v01.0.0', 'v1.01.0', 'v1.0.00', 'v1.0.0-01')) {
+            if ($invalidTag -match $gitTagPattern) {
+                throw "Схема принимает недопустимый Git-тег '$invalidTag'."
+            }
+        }
+        if ('v1.2.3-alpha.1+build.5' -notmatch $gitTagPattern) {
+            throw 'Схема отклоняет допустимый Git-тег.'
+        }
+    }
+
     It 'возвращает путь версии только внутри versions' {
         $path = Get-GovernanceVersionPath -RepositoryRoot $repositoryRoot -Version '1.0.0'
         Assert-Equal $path.FullName (Join-Path $repositoryRoot 'versions/1.0.0')
@@ -60,7 +107,10 @@ Describe 'Governance.Common' {
         try {
             $manifestDirectory = Join-Path $project '.codex/governance'
             New-Item -ItemType Directory -Path $manifestDirectory -Force | Out-Null
-            '{"schemaVersion":1,"rulesVersion":"1.0.0"}' | Set-Content -LiteralPath (Join-Path $manifestDirectory 'manifest.json') -NoNewline
+            $manifestPath = Join-Path $manifestDirectory 'manifest.json'
+            $manifestJson = '{"schemaVersion":1,"rulesVersion":"1.0.0"}'
+            $manifestEncoding = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
+            [System.IO.File]::WriteAllText($manifestPath, $manifestJson, $manifestEncoding)
 
             $manifest = Get-GovernanceManifest -ProjectPath $project
 
@@ -108,13 +158,44 @@ Describe 'Governance.Common' {
         }
     }
 
+    It 'отклоняет совпадение нормализованных относительных путей' {
+        $module = Get-Module Governance.Common
+        Assert-Throws -MessagePattern 'Нормализованные относительные пути конфликтуют' {
+            & $module { Assert-GovernanceUniqueRelativePaths -RelativePaths @('A.txt', 'a.txt') }
+        }
+    }
+
+    It 'отклоняет case-colliding файлы, когда файловая система их поддерживает' {
+        $fixture = New-FixtureDirectory 'case-collision'
+        try {
+            Write-FixtureFile $fixture 'A.txt' 'upper'
+            Write-FixtureFile $fixture 'a.txt' 'lower'
+            $files = @(Get-ChildItem -LiteralPath $fixture -File)
+
+            if ($files.Count -eq 2) {
+                Assert-Throws -MessagePattern 'Нормализованные относительные пути конфликтуют' {
+                    Get-GovernanceChecksums -RootPath $fixture
+                }
+            }
+            else {
+                $module = Get-Module Governance.Common
+                Assert-Throws -MessagePattern 'Нормализованные относительные пути конфликтуют' {
+                    & $module { Assert-GovernanceUniqueRelativePaths -RelativePaths @('A.txt', 'a.txt') }
+                }
+            }
+        }
+        finally {
+            Remove-Item -LiteralPath $fixture -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
     It 'не заменяет файл без Replace и заменяет его с Replace' {
         $fixture = New-FixtureDirectory 'copy'
         try {
             $source = Join-Path $fixture 'source.txt'
             $destination = Join-Path $fixture 'destination.txt'
-            [System.IO.File]::WriteAllText($source, 'source')
-            [System.IO.File]::WriteAllText($destination, 'destination')
+            [System.IO.File]::WriteAllText($source, 'source', [System.Text.UTF8Encoding]::new($false))
+            [System.IO.File]::WriteAllText($destination, 'destination', [System.Text.UTF8Encoding]::new($false))
 
             Assert-Throws { Copy-GovernanceFile -Source $source -Destination $destination }
             Copy-GovernanceFile -Source $source -Destination $destination -Replace

@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true, Position = 0, ValueFromRemainingArguments = $true)]
     [string[]]$TestFiles
@@ -65,12 +65,18 @@ function Assert-SequenceEqual {
 }
 
 function Assert-Throws {
-    param([Parameter(Mandatory = $true)][scriptblock]$ScriptBlock)
+    param(
+        [Parameter(Mandatory = $true)][scriptblock]$ScriptBlock,
+        [string]$MessagePattern
+    )
 
     try {
         & $ScriptBlock
     }
     catch {
+        if ($MessagePattern -and $_.Exception.Message -notmatch $MessagePattern) {
+            throw "Исключение не соответствует шаблону '$MessagePattern': $($_.Exception.Message)"
+        }
         return
     }
 

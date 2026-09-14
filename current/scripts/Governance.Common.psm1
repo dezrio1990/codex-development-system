@@ -1,4 +1,35 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
+
+$script:SemVerPattern = '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-((0|[1-9]\d*)|(\d*[A-Za-z-][0-9A-Za-z-]*))(\.((0|[1-9]\d*)|(\d*[A-Za-z-][0-9A-Za-z-]*)))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+
+function Get-GovernanceRelativePath {
+    param(
+        [Parameter(Mandatory = $true)][string]$RootPath,
+        [Parameter(Mandatory = $true)][string]$FilePath
+    )
+
+    $root = [System.IO.Path]::GetFullPath($RootPath)
+    $file = [System.IO.Path]::GetFullPath($FilePath)
+    $rootWithSeparator = $root.TrimEnd([char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)) + [System.IO.Path]::DirectorySeparatorChar
+
+    if (-not $file.StartsWith($rootWithSeparator, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Файл находится вне корневого каталога: $FilePath"
+    }
+
+    return $file.Substring($rootWithSeparator.Length).Replace('\', '/')
+}
+
+function Assert-GovernanceUniqueRelativePaths {
+    param([Parameter(Mandatory = $true)][string[]]$RelativePaths)
+
+    $knownPaths = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($relativePath in $RelativePaths) {
+        if ($knownPaths.ContainsKey($relativePath)) {
+            throw "Нормализованные относительные пути конфликтуют: '$($knownPaths[$relativePath])' и '$relativePath'."
+        }
+        $knownPaths.Add($relativePath, $relativePath)
+    }
+}
 
 function Get-GovernancePayloadFiles {
     param([Parameter(Mandatory = $true)][string]$RootPath)
@@ -8,17 +39,22 @@ function Get-GovernancePayloadFiles {
         throw "Каталог не найден: $RootPath"
     }
 
-    $payloadByPath = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+    $payloadFiles = [System.Collections.Generic.List[object]]::new()
     Get-ChildItem -LiteralPath $root -Recurse -File -Force |
         Where-Object { $_.Name -notin @('version.json', 'checksums.sha256') } |
         ForEach-Object {
-            $relativePath = [System.IO.Path]::GetRelativePath($root, $_.FullName).Replace('\', '/')
-            $payloadByPath.Add($relativePath, [PSCustomObject]@{
+            $relativePath = Get-GovernanceRelativePath -RootPath $root -FilePath $_.FullName
+            $payloadFiles.Add([PSCustomObject]@{
                 File = $_
                 RelativePath = $relativePath
             })
         }
 
+    Assert-GovernanceUniqueRelativePaths -RelativePaths @($payloadFiles | ForEach-Object { $_.RelativePath })
+    $payloadByPath = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+    foreach ($payloadFile in $payloadFiles) {
+        $payloadByPath.Add($payloadFile.RelativePath, $payloadFile)
+    }
     $paths = [string[]]@($payloadByPath.Keys)
     [System.Array]::Sort($paths, [System.StringComparer]::OrdinalIgnoreCase)
     return @($paths | ForEach-Object { $payloadByPath[$_] })
@@ -43,7 +79,7 @@ function Get-GovernanceVersionPath {
         [Parameter(Mandatory = $true)][string]$Version
     )
 
-    if ($Version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$') {
+    if ($Version -notmatch $script:SemVerPattern) {
         throw "Версия должна быть SemVer без сегментов пути: $Version"
     }
 
