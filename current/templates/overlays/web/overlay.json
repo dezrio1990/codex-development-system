@@ -9,6 +9,6 @@
     "package-manager"
   ],
   "verificationCommands": [
-    "Команды build, test, lint и typecheck, объявленные в package manager и scripts утверждённого проекта"
+    "{{PACKAGE_MANAGER}} run {{SCRIPT}}"
   ]
 }

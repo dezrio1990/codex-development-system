@@ -10,6 +10,6 @@
     "xcodebuild"
   ],
   "verificationCommands": [
-    "xcodebuild <параметры scheme/workspace/destination из утверждённого проекта>"
+    "xcodebuild {{XCODEBUILD_ARGUMENTS}}"
   ]
 }

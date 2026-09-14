@@ -10,6 +10,7 @@
     "gradle-wrapper"
   ],
   "verificationCommands": [
-    "gradlew/gradlew.bat <утверждённая задача Gradle>"
+    "./gradlew {{GRADLE_TASK}}",
+    ".\\gradlew.bat {{GRADLE_TASK}}"
   ]
 }

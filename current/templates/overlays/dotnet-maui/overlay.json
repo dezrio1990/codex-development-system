@@ -11,6 +11,6 @@
   ],
   "verificationCommands": [
     "dotnet workload restore",
-    "dotnet build <утверждённый target-specific target>"
+    "dotnet build {{DOTNET_MAUI_TARGET}}"
   ]
 }

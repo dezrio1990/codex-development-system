@@ -6,8 +6,8 @@ $OverlaysPath = Join-Path $Root 'current/templates/overlays'
 
 function Assert-OrdinalSequenceEqual {
     param(
-        [Parameter(Mandatory = $true)][string[]]$Actual,
-        [Parameter(Mandatory = $true)][string[]]$Expected
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Actual,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Expected
     )
 
     if ($Actual.Count -ne $Expected.Count) {
@@ -503,6 +503,44 @@ Describe 'Платформенные overlays' {
         }
     }
 
+    It 'задаёт для всех overlays исполнимые команды или документированные шаблоны' {
+        $expectedCommands = @{
+            'android' = @('./gradlew {{GRADLE_TASK}}', '.\gradlew.bat {{GRADLE_TASK}}')
+            'dotnet' = @('dotnet restore', 'dotnet build', 'dotnet test')
+            'dotnet-maui' = @('dotnet workload restore', 'dotnet build {{DOTNET_MAUI_TARGET}}')
+            'ios' = @('xcodebuild {{XCODEBUILD_ARGUMENTS}}')
+            'web' = @('{{PACKAGE_MANAGER}} run {{SCRIPT}}')
+        }
+        $expectedPlaceholders = @{
+            'android' = @('{{GRADLE_TASK}}')
+            'dotnet' = @()
+            'dotnet-maui' = @('{{DOTNET_MAUI_TARGET}}')
+            'ios' = @('{{XCODEBUILD_ARGUMENTS}}')
+            'web' = @('{{PACKAGE_MANAGER}}', '{{SCRIPT}}')
+        }
+
+        foreach ($entry in Get-OverlayManifests) {
+            $overlayName = $entry.Directory.Name
+            Assert-OrdinalSequenceEqual -Actual @($entry.Value.verificationCommands) -Expected $expectedCommands[$overlayName]
+
+            $commandText = [string]::Join("`n", @($entry.Value.verificationCommands))
+            Assert-TextNotMatches $commandText '<[^>]+>'
+            $actualPlaceholders = @([regex]::Matches($commandText, '\{\{[A-Z][A-Z0-9_]*\}\}') | ForEach-Object { $_.Value } | Select-Object -Unique)
+            Assert-OrdinalSequenceEqual -Actual $actualPlaceholders -Expected $expectedPlaceholders[$overlayName]
+
+            if ($actualPlaceholders.Count -gt 0) {
+                $appendPath = Join-Path $entry.Directory.FullName 'AGENTS.append.md'
+                $append = Get-Content -LiteralPath $appendPath -Encoding UTF8 -Raw -ErrorAction Stop
+                foreach ($marker in @('Единое соглашение для placeholders', 'только из утверждённого', 'Неразрешённый placeholder означает ошибку', 'нельзя выполнять')) {
+                    Assert-TextContains $append $marker
+                }
+                foreach ($placeholder in $actualPlaceholders) {
+                    Assert-TextContains $append $placeholder.Trim([char]'{' , [char]'}')
+                }
+            }
+        }
+    }
+
     It 'каждый append-файл остаётся русскоязычным дополнением и требует чтения источников истины' {
         foreach ($entry in Get-OverlayManifests) {
             $appendPath = Join-Path $entry.Directory.FullName 'AGENTS.append.md'
@@ -542,7 +580,7 @@ Describe 'Платформенные overlays' {
     It 'android overlay требует только Gradle wrapper проекта' {
         $entry = @(Get-OverlayManifests | Where-Object { $_.Directory.Name -ceq 'android' })[0]
         $content = Get-Content -LiteralPath (Join-Path $entry.Directory.FullName 'AGENTS.append.md') -Encoding UTF8 -Raw -ErrorAction Stop
-        foreach ($marker in @('gradlew', 'gradlew.bat', 'не системный Gradle', 'Kotlin', 'Jetpack Compose', 'lifecycle', 'восстановление состояния', 'разрешения', 'coroutines', 'accessibility', 'emulator')) {
+        foreach ($marker in @('gradlew', 'gradlew.bat', 'POSIX', 'Windows', 'не системный Gradle', 'Kotlin', 'Jetpack Compose', 'lifecycle', 'восстановление состояния', 'разрешения', 'coroutines', 'accessibility', 'emulator')) {
             Assert-TextContains $content $marker
         }
     }
