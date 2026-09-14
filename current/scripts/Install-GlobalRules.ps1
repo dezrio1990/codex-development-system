@@ -2,7 +2,9 @@
 param(
     [Parameter(Mandatory = $true)][string]$RepositoryRoot,
     [Parameter(Mandatory = $true)][string]$Version,
-    [Parameter(Mandatory = $true)][string]$CodexHome
+    [Parameter(Mandatory = $true)][string]$CodexHome,
+    # Скрытый seam только для детерминированных тестов гонки; в обычном CLI не используется.
+    [Parameter(DontShow = $true)][scriptblock]$TestBeforeApply
 )
 
 Set-StrictMode -Version Latest
@@ -88,8 +90,8 @@ function Assert-SafeCodexHome {
         throw "Опасная цель CodexHome: нельзя устанавливать в домашний каталог пользователя: $Path"
     }
 
-    if ((Test-ExactPath -Left $fullPath -Right $RepositoryPath) -or (Test-PathInside -Candidate $RepositoryPath -Container $fullPath)) {
-        throw "Опасная цель CodexHome: каталог репозитория и его предки запрещены: $Path"
+    if ((Test-PathInside -Candidate $fullPath -Container $RepositoryPath) -or (Test-PathInside -Candidate $RepositoryPath -Container $fullPath)) {
+        throw "Опасная цель CodexHome: каталог репозитория, его потомки и предки запрещены: $Path"
     }
 
     Assert-NoReparsePoint -Path $fullPath
@@ -143,6 +145,47 @@ function Test-ByteSequenceEqual {
     return $true
 }
 
+function Get-ByteSequenceIndexes {
+    param(
+        [AllowEmptyCollection()][byte[]]$Bytes = @(),
+        [Parameter(Mandatory = $true)][byte[]]$Needle
+    )
+
+    $indexes = [System.Collections.Generic.List[int]]::new()
+    $startIndex = 0
+    while ($true) {
+        $index = Find-ByteSequence -Bytes $Bytes -Needle $Needle -StartIndex $startIndex
+        if ($index -lt 0) {
+            return $indexes.ToArray()
+        }
+        $indexes.Add($index)
+        $startIndex = $index + $Needle.Length
+    }
+}
+
+function Get-ManagedMarkerLayout {
+    param(
+        [AllowEmptyCollection()][byte[]]$Bytes = @(),
+        [switch]$Source
+    )
+
+    $beginIndexes = @(Get-ByteSequenceIndexes -Bytes $Bytes -Needle $utf8.GetBytes($beginMarker))
+    $endIndexes = @(Get-ByteSequenceIndexes -Bytes $Bytes -Needle $utf8.GetBytes($endMarker))
+    if ($Source) {
+        if ($beginIndexes.Count -ne 0 -or $endIndexes.Count -ne 0) {
+            throw 'Source payload AGENTS.md не должен содержать управляемые markers.'
+        }
+        return
+    }
+    if ($beginIndexes.Count -eq 0 -and $endIndexes.Count -eq 0) {
+        return [PSCustomObject]@{ Begin = -1; End = -1 }
+    }
+    if ($beginIndexes.Count -ne 1 -or $endIndexes.Count -ne 1 -or $beginIndexes[0] -ge $endIndexes[0]) {
+        throw 'AGENTS.md содержит неоднозначные, вложенные или неполные управляемые markers.'
+    }
+    return [PSCustomObject]@{ Begin = $beginIndexes[0]; End = $endIndexes[0] }
+}
+
 function Add-Bytes {
     param(
         [Parameter(Mandatory = $true)][System.IO.Stream]$Stream,
@@ -160,20 +203,13 @@ function New-ManagedAgentsBytes {
         [AllowEmptyCollection()][byte[]]$SourceBytes = @()
     )
 
+    Get-ManagedMarkerLayout -Bytes $SourceBytes -Source
     $beginBytes = $utf8.GetBytes($beginMarker)
     $endBytes = $utf8.GetBytes($endMarker)
     $newLineBytes = $utf8.GetBytes("`n")
-    $beginIndex = Find-ByteSequence -Bytes $ExistingBytes -Needle $beginBytes
-    $endIndex = -1
-    if ($beginIndex -ge 0) {
-        $endIndex = Find-ByteSequence -Bytes $ExistingBytes -Needle $endBytes -StartIndex ($beginIndex + $beginBytes.Length)
-        if ($endIndex -lt 0) {
-            throw 'Найден неполный управляемый блок AGENTS.md. Восстановите end marker вручную перед установкой.'
-        }
-    }
-    elseif ((Find-ByteSequence -Bytes $ExistingBytes -Needle $endBytes) -ge 0) {
-        throw 'Найден end marker без begin marker в AGENTS.md. Восстановите файл вручную перед установкой.'
-    }
+    $layout = Get-ManagedMarkerLayout -Bytes $ExistingBytes
+    $beginIndex = $layout.Begin
+    $endIndex = $layout.End
 
     $stream = [System.IO.MemoryStream]::new()
     try {
@@ -218,10 +254,32 @@ function New-ManagedAgentsBytes {
     }
 }
 
+function Assert-PlannedFileState {
+    param([Parameter(Mandatory = $true)]$Operation)
+
+    Assert-NoReparsePoint -Path $Operation.Target
+    Assert-NoReparsePoint -Path $Operation.Source
+    if (-not (Test-Path -LiteralPath $Operation.Source -PathType Leaf) -or -not (Test-ByteSequenceEqual -Left ([System.IO.File]::ReadAllBytes($Operation.Source)) -Right $Operation.SourceBytes)) {
+        throw "Source snapshot изменился после построения плана; остановлено для перепланирования: $($Operation.Source)"
+    }
+
+    $existsNow = Test-Path -LiteralPath $Operation.Target
+    if ([bool]$Operation.ExpectedExists -ne [bool]$existsNow) {
+        throw "Файл назначения изменился после построения плана; остановлено для перепланирования: $($Operation.Target)"
+    }
+    if ($existsNow) {
+        if (-not (Test-Path -LiteralPath $Operation.Target -PathType Leaf) -or -not (Test-ByteSequenceEqual -Left ([System.IO.File]::ReadAllBytes($Operation.Target)) -Right $Operation.ExpectedBytes)) {
+            throw "Файл назначения изменился после построения плана; остановлено для перепланирования: $($Operation.Target)"
+        }
+    }
+}
+
 function Write-AtomicBytes {
     param(
         [Parameter(Mandatory = $true)][string]$Destination,
-        [Parameter(Mandatory = $true)][byte[]]$Bytes
+        [Parameter(Mandatory = $true)][byte[]]$Bytes,
+        [switch]$RequireAbsent,
+        [AllowEmptyCollection()][byte[]]$ExpectedBytes
     )
 
     $directory = Split-Path -Parent $Destination
@@ -229,6 +287,12 @@ function Write-AtomicBytes {
     try {
         [System.IO.File]::WriteAllBytes($temporary, $Bytes)
         if (Test-Path -LiteralPath $Destination) {
+            if ($RequireAbsent) {
+                throw "Файл появился после построения плана; остановлено для перепланирования: $Destination"
+            }
+            if ($PSBoundParameters.ContainsKey('ExpectedBytes') -and -not (Test-ByteSequenceEqual -Left ([System.IO.File]::ReadAllBytes($Destination)) -Right $ExpectedBytes)) {
+                throw "Файл назначения изменился перед заменой; остановлено для перепланирования: $Destination"
+            }
             # Резервная копия создаётся вызывающим кодом до замены. В Windows
             # File.Copy с overwrite поддерживает PS 5.1 без зависимости от
             # File.Replace, которая недоступна на части файловых систем.
@@ -336,7 +400,7 @@ if (-not (Test-ByteSequenceEqual -Left $existingRulesBytes -Right $managedRulesB
             $suffix++
         }
     }
-    $plan.Add([PSCustomObject]@{ Kind = 'WriteManagedRules'; Target = $agentsRulesDestination; Source = $snapshot.AgentsRulesPath; Backup = $rulesBackup; Bytes = $managedRulesBytes })
+    $plan.Add([PSCustomObject]@{ Kind = 'WriteManagedRules'; Target = $agentsRulesDestination; Source = $snapshot.AgentsRulesPath; Backup = $rulesBackup; Bytes = $managedRulesBytes; SourceBytes = $sourceRulesBytes; ExpectedExists = (Test-Path -LiteralPath $agentsRulesDestination -PathType Leaf); ExpectedBytes = $existingRulesBytes })
 }
 
 foreach ($name in $expectedAgentNames) {
@@ -349,7 +413,7 @@ foreach ($name in $expectedAgentNames) {
 
     $sourceBytes = [System.IO.File]::ReadAllBytes($sourcePath)
     if (-not (Test-Path -LiteralPath $destinationPath)) {
-        $plan.Add([PSCustomObject]@{ Kind = 'AddAgent'; Target = $destinationPath; Source = $sourcePath; Backup = $null; Bytes = $sourceBytes })
+        $plan.Add([PSCustomObject]@{ Kind = 'AddAgent'; Target = $destinationPath; Source = $sourcePath; Backup = $null; Bytes = $sourceBytes; SourceBytes = $sourceBytes; ExpectedExists = $false; ExpectedBytes = [byte[]]@() })
         continue
     }
 
@@ -364,7 +428,7 @@ foreach ($name in $expectedAgentNames) {
         $backupPath = $destinationPath + '.backup-' + $timestamp + '-' + $suffix
         $suffix++
     }
-    $plan.Add([PSCustomObject]@{ Kind = 'ReplaceAgent'; Target = $destinationPath; Source = $sourcePath; Backup = $backupPath; Bytes = $sourceBytes })
+    $plan.Add([PSCustomObject]@{ Kind = 'ReplaceAgent'; Target = $destinationPath; Source = $sourcePath; Backup = $backupPath; Bytes = $sourceBytes; SourceBytes = $sourceBytes; ExpectedExists = $true; ExpectedBytes = $destinationBytes })
 }
 
 Write-Host 'План безопасной установки:'
@@ -383,24 +447,39 @@ if (-not $PSCmdlet.ShouldProcess($codexHomePath, "Установить глоб�
 }
 
 try {
+    if ($null -ne $TestBeforeApply) {
+        & $TestBeforeApply
+    }
+    foreach ($operation in $plan | Where-Object { $_.Kind -ne 'CreateDirectory' }) {
+        Assert-PlannedFileState -Operation $operation
+    }
     foreach ($operation in $plan | Where-Object { $_.Kind -eq 'CreateDirectory' }) {
-        New-Item -ItemType Directory -Path $operation.Target -Force -ErrorAction Stop | Out-Null
+        Assert-NoReparsePoint -Path $operation.Target
+        if (-not (Test-Path -LiteralPath $operation.Target)) {
+            New-Item -ItemType Directory -Path $operation.Target -ErrorAction Stop | Out-Null
+        }
+        elseif (-not (Test-Path -LiteralPath $operation.Target -PathType Container)) {
+            throw "Каталог назначения изменился после построения плана; остановлено для перепланирования: $($operation.Target)"
+        }
     }
     Assert-NoReparsePoint -Path $codexHomePath
     Assert-NoReparsePoint -Path $agentsDestinationPath
 
     foreach ($operation in $plan | Where-Object { $_.Kind -eq 'WriteManagedRules' }) {
+        Assert-PlannedFileState -Operation $operation
         if ($null -ne $operation.Backup) {
             [System.IO.File]::Copy($operation.Target, $operation.Backup, $false)
         }
-        Write-AtomicBytes -Destination $operation.Target -Bytes $operation.Bytes
+        Write-AtomicBytes -Destination $operation.Target -Bytes $operation.Bytes -RequireAbsent:(-not $operation.ExpectedExists) -ExpectedBytes $operation.ExpectedBytes
     }
     foreach ($operation in $plan | Where-Object { $_.Kind -eq 'AddAgent' }) {
-        Write-AtomicBytes -Destination $operation.Target -Bytes $operation.Bytes
+        Assert-PlannedFileState -Operation $operation
+        Write-AtomicBytes -Destination $operation.Target -Bytes $operation.Bytes -RequireAbsent
     }
     foreach ($operation in $plan | Where-Object { $_.Kind -eq 'ReplaceAgent' }) {
+        Assert-PlannedFileState -Operation $operation
         [System.IO.File]::Copy($operation.Target, $operation.Backup, $false)
-        Write-AtomicBytes -Destination $operation.Target -Bytes $operation.Bytes
+        Write-AtomicBytes -Destination $operation.Target -Bytes $operation.Bytes -ExpectedBytes $operation.ExpectedBytes
     }
 }
 catch {
