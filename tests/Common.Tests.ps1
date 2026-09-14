@@ -182,6 +182,27 @@ Describe 'Governance.Common' {
         }
     }
 
+    It 'исключает служебные файлы только в корне и включает вложенные одноимённые файлы в hash' {
+        $fixture = New-FixtureDirectory 'nested-metadata'
+        try {
+            Write-FixtureFile $fixture 'payload.txt' 'payload'
+            Write-FixtureFile $fixture 'version.json' 'root-version'
+            Write-FixtureFile $fixture 'checksums.sha256' 'root-checksums'
+            $before = Get-GovernanceContentHash -RootPath $fixture
+
+            Write-FixtureFile $fixture 'nested/version.json' 'nested-version'
+            Write-FixtureFile $fixture 'nested/checksums.sha256' 'nested-checksums'
+            $checksums = @(Get-GovernanceChecksums -RootPath $fixture)
+            $after = Get-GovernanceContentHash -RootPath $fixture
+
+            Assert-SequenceEqual @($checksums | ForEach-Object { $_ -replace '^[0-9a-f]{64}  ', '' }) @('nested/checksums.sha256', 'nested/version.json', 'payload.txt')
+            if ($before -ceq $after) { throw 'Вложенные version.json/checksums.sha256 должны менять content hash.' }
+        }
+        finally {
+            Remove-Item -LiteralPath $fixture -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
     It 'сортирует пути checksums через ordinal-ignore-case' {
         $fixture = New-FixtureDirectory 'ordinal-sort'
         try {

@@ -41,9 +41,11 @@ function Get-GovernancePayloadFiles {
 
     $payloadFiles = [System.Collections.Generic.List[object]]::new()
     Get-ChildItem -LiteralPath $root -Recurse -File -Force |
-        Where-Object { $_.Name -notin @('version.json', 'checksums.sha256') } |
         ForEach-Object {
             $relativePath = Get-GovernanceRelativePath -RootPath $root -FilePath $_.FullName
+            # Метаданные исключаются только в корне; сравнение регистронезависимо
+            # соответствует portable-политике Windows для путей release tree.
+            if ([StringComparer]::OrdinalIgnoreCase.Equals($relativePath, 'version.json') -or [StringComparer]::OrdinalIgnoreCase.Equals($relativePath, 'checksums.sha256')) { return }
             $payloadFiles.Add([PSCustomObject]@{
                 File = $_
                 RelativePath = $relativePath

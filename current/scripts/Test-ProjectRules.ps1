@@ -152,14 +152,16 @@ function Test-InstalledRules {
     param([string]$Project, $Manifest)
     try {
         $governance = Join-Path $Project '.codex/governance'; $base = Join-Path $governance 'base-rules.md'; $overlaysPath = Join-Path $governance 'overlays'
-        $expected = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        $expected = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
         $expected.Add('base-rules.md') | Out-Null
         foreach ($overlay in @($Manifest.overlays)) { $expected.Add('overlays/' + $overlay + '.md') | Out-Null }
-        $actual = [Collections.Generic.List[object]]::new(); $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        $actual = [Collections.Generic.List[object]]::new()
+        $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        $portableNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
         foreach ($file in @(Get-ChildItem -LiteralPath $governance -Recurse -File -Force -ErrorAction Stop)) {
             $relative = $file.FullName.Substring($governance.TrimEnd([char]92, [char]'/').Length).TrimStart([char]92, [char]'/').Replace([char]92, [char]'/')
             if ($relative -ceq 'manifest.json' -or $relative -ceq 'README.md') { continue }
-            if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or -not $names.Add($relative) -or -not $expected.Contains($relative)) { return $false }
+            if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or -not $names.Add($relative) -or -not $portableNames.Add($relative) -or -not $expected.Contains($relative)) { return $false }
             $actual.Add([PSCustomObject]@{ Name = $relative; Path = $file.FullName }) | Out-Null
         }
         if (-not (Test-Path -LiteralPath $base -PathType Leaf) -or $actual.Count -ne $expected.Count) { return $false }
@@ -190,8 +192,35 @@ function Resolve-RequiredPath {
     if ([string]::IsNullOrWhiteSpace($Value) -or [Uri]::IsWellFormedUriString($Value, [UriKind]::Absolute) -or [IO.Path]::IsPathRooted($Value) -or $Value -match '(^|[\\/])\.\.([\\/]|$)' -or $Value -match '[:<>"|?*]') { return $null }
     $base = if ($Value -match '^(\.codex/|docs/|AGENTS\.md\z)') { $Project } else { Split-Path -Parent $Document }
     $candidate = [IO.Path]::GetFullPath((Join-Path $base $Value))
-    if (-not (Test-PathInside $candidate $Project)) { return $null }
+    if (-not (Test-PathInside $candidate $Project) -or -not (Test-NoReparsePathComponent $Project $candidate)) { return $null }
     return $candidate
+}
+
+function Test-NoReparsePathComponent {
+    # Лексическая проверка пути недостаточна: junction/symlink может вывести
+    # наружу после неё. Это проверка состояния, не handle-level TOCTOU защита.
+    param([string]$Project, [string]$Candidate)
+    try {
+        $root = [IO.Path]::GetFullPath($Project).TrimEnd([char]92, [char]'/')
+        $relative = [IO.Path]::GetFullPath($Candidate).Substring($root.Length).TrimStart([char]92, [char]'/')
+        $current = $root
+        foreach ($segment in ($relative -split '[\\/]')) {
+            if ([string]::IsNullOrWhiteSpace($segment)) { continue }
+            $current = Join-Path $current $segment
+            if (-not (Test-Path -LiteralPath $current)) { break }
+            $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
+        }
+        return $true
+    }
+    catch { return $false }
+}
+
+function Test-ExternalHttpRelated {
+    param([string]$Value)
+    $uri = $null
+    if (-not [Uri]::TryCreate($Value, [UriKind]::Absolute, [ref]$uri)) { return $false }
+    return $uri.Scheme -ceq 'http' -or $uri.Scheme -ceq 'https'
 }
 
 function Get-FrontMatter {
@@ -219,16 +248,18 @@ function Test-Documents {
             if (-not $document.IsRootAgents) { Add-Diagnostic $Errors 'STATUS_INVALID' $document.Path 'Управляемый документ не содержит front matter.' }
             continue
         }
-        if (-not $frontMatter.ContainsKey('status') -or $frontMatter.status -cnotin @('Draft', 'In Review', 'Approved', 'Superseded', 'Archived')) { Add-Diagnostic $Errors 'STATUS_INVALID' $document.Path 'status должен быть одним из Draft, In Review, Approved, Superseded, Archived.' }
-        if ($frontMatter.status -ceq 'Approved' -and $text -match '(\{\{[^}]+\}\}|\bTODO\b|\bTBD\b|Не заполнено|Не назначен|\[заполнить\])') { Add-Diagnostic $Errors 'APPROVED_PLACEHOLDER' $document.Path 'Утверждённый документ содержит явный незаполненный marker.' }
-        $required = [Collections.Generic.List[string]]::new()
-        if ($frontMatter.ContainsKey('related')) { foreach ($value in ($frontMatter.related -split ';')) { if (-not [string]::IsNullOrWhiteSpace($value)) { $required.Add($value.Trim()) | Out-Null } } }
-        if ($frontMatter.ContainsKey('russian_explanation')) { $required.Add($frontMatter.russian_explanation.Trim()) | Out-Null }
+        $status = $null
+        $validStatus = $frontMatter.ContainsKey('status') -and $frontMatter.status -is [string] -and $frontMatter.status -cin @('Draft', 'In Review', 'Approved', 'Superseded', 'Archived')
+        if (-not $validStatus) { Add-Diagnostic $Errors 'STATUS_INVALID' $document.Path 'status должен быть одним из Draft, In Review, Approved, Superseded, Archived.' } else { $status = $frontMatter.status }
+        if ($status -ceq 'Approved' -and $text -match '(\{\{[^}]+\}\}|\bTODO\b|\bTBD\b|Не заполнено|Не назначен|\[заполнить\])') { Add-Diagnostic $Errors 'APPROVED_PLACEHOLDER' $document.Path 'Утверждённый документ содержит явный незаполненный marker.' }
+        $required = [Collections.Generic.List[object]]::new()
+        if ($frontMatter.ContainsKey('related')) { foreach ($value in ($frontMatter.related -split ';')) { if (-not [string]::IsNullOrWhiteSpace($value)) { $trimmed = $value.Trim(); if (-not (Test-ExternalHttpRelated $trimmed)) { $required.Add([PSCustomObject]@{ Value = $trimmed; IsRussianExplanation = $false }) | Out-Null } } } }
+        if ($frontMatter.ContainsKey('russian_explanation')) { $required.Add([PSCustomObject]@{ Value = $frontMatter.russian_explanation.Trim(); IsRussianExplanation = $true }) | Out-Null }
         $russianTarget = $null
-        foreach ($value in $required) {
-            $target = Resolve-RequiredPath $Project $document.Path $value
-            if ($null -eq $target -or -not (Test-Path -LiteralPath $target)) { Add-Diagnostic $Errors 'BROKEN_REQUIRED_LINK' $document.Path "Обязательная ссылка недоступна или небезопасна: $value" }
-            elseif ($frontMatter.ContainsKey('russian_explanation') -and $value -ceq $frontMatter.russian_explanation.Trim()) { $russianTarget = $target }
+        foreach ($requiredLink in $required) {
+            $target = Resolve-RequiredPath $Project $document.Path $requiredLink.Value
+            if ($null -eq $target -or -not (Test-Path -LiteralPath $target)) { Add-Diagnostic $Errors 'BROKEN_REQUIRED_LINK' $document.Path "Обязательная ссылка недоступна или небезопасна: $($requiredLink.Value)" }
+            elseif ($requiredLink.IsRussianExplanation) { $russianTarget = $target }
         }
         if ($text -notmatch '[\u0400-\u052F]') {
             if ($null -eq $russianTarget -or -not (Test-Path -LiteralPath $russianTarget -PathType Leaf) -or (Get-Content -LiteralPath $russianTarget -Raw -Encoding UTF8) -notmatch '[\u0400-\u052F]') { Add-Diagnostic $Errors 'RUSSIAN_EXPLANATION_MISSING' $document.Path 'Документ не содержит кириллицу и не имеет доступного русского пояснения.' }

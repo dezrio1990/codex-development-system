@@ -96,6 +96,30 @@ function Set-DocumentFrontMatter {
     [IO.File]::WriteAllBytes($Path, $Utf8.GetBytes("---`n$FrontMatter`n---`n$body"))
 }
 
+function Get-ValidationSha256 {
+    param([byte[]]$Bytes)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($algorithm.ComputeHash($Bytes))).Replace('-', '').ToLowerInvariant() }
+    finally { $algorithm.Dispose() }
+}
+
+function Get-InstalledHashForFixture {
+    param($Fixture, [string[]]$Names)
+    $items = foreach ($name in $Names) {
+        [PSCustomObject]@{ Name = $name; Path = Join-Path $Fixture.Project ('.codex/governance/' + $name) }
+    }
+    $lines = foreach ($item in @($items | Sort-Object Name)) { (Get-ValidationSha256 ([IO.File]::ReadAllBytes($item.Path))) + '  ' + $item.Name }
+    return Get-ValidationSha256 $Utf8.GetBytes(($lines -join "`n") + "`n")
+}
+
+function Remove-ValidationJunction {
+    param([string]$Path)
+    if (Test-Path -LiteralPath $Path) {
+        $item = Get-Item -LiteralPath $Path -Force
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { [IO.Directory]::Delete($Path, $false) }
+    }
+}
+
 Describe 'Проверка закреплённого governance-состояния' {
     It 'возвращает строгое JSON-состояние valid fixture и warning отсутствующего активного плана без записи' {
         $fixture = New-ValidationFixture
@@ -138,6 +162,17 @@ Describe 'Проверка закреплённого governance-состоян�
             }
             finally { Remove-ValidationFixture $fixture }
         }
+    }
+
+    It 'обнаруживает вложенные version.json и checksums.sha256 как tamper выпуска' {
+        $fixture = New-ValidationFixture
+        try {
+            $nested = Join-Path $fixture.Release 'templates/base/nested/version.json'
+            New-Item -ItemType Directory -Path (Split-Path -Parent $nested) -Force | Out-Null
+            [IO.File]::WriteAllBytes($nested, $Utf8.GetBytes('tamper'))
+            Assert-ValidationCode (Get-ValidationJson (Invoke-Validator $fixture)) 'RELEASE_HASH_MISMATCH' 'errors'
+        }
+        finally { Remove-ValidationFixture $fixture }
     }
 
     It 'возвращает AGENTS_TOO_LARGE как warning без ошибки' {
@@ -183,6 +218,18 @@ Describe 'Проверка закреплённого governance-состоян�
         }
     }
 
+    It 'отклоняет overlay с неверным регистром даже при self-consistent installed hash' {
+        $fixture = New-ValidationFixture
+        try {
+            $lower = Join-Path $fixture.Project '.codex/governance/overlays/android.md'
+            $upper = Join-Path $fixture.Project '.codex/governance/overlays/Android.md'
+            Move-Item -LiteralPath $lower -Destination $upper
+            Set-ManifestText $fixture { param($manifest) $manifest.installedContentHash = Get-InstalledHashForFixture $fixture @('base-rules.md', 'overlays/Android.md') }
+            Assert-ValidationCode (Get-ValidationJson (Invoke-Validator $fixture)) 'INSTALLED_HASH_MISMATCH' 'errors'
+        }
+        finally { Remove-ValidationFixture $fixture }
+    }
+
     It 'отклоняет malformed front matter, invalid Russian explanation и unsafe required link' {
         $mutations = @(
             @{ Codes = @('STATUS_INVALID'); Mutate = { param($f) [IO.File]::WriteAllBytes((Join-Path $f.Project 'docs/status/current.md'), $Utf8.GetBytes("---`nstatus: Draft`n# без закрытия`n")) } },
@@ -198,6 +245,48 @@ Describe 'Проверка закреплённого governance-состоян�
             }
             finally { Remove-ValidationFixture $fixture }
         }
+    }
+
+    It 'без status выдаёт STATUS_INVALID и продолжает независимые проверки документов' {
+        $fixture = New-ValidationFixture
+        try {
+            Set-DocumentFrontMatter (Join-Path $fixture.Project 'docs/status/current.md') 'related: AGENTS.md'
+            [IO.File]::WriteAllBytes((Join-Path $fixture.Project 'docs/english.md'), $Utf8.GetBytes("---`nstatus: Draft`n---`n# English`nOnly English.`n"))
+            $json = Get-ValidationJson (Invoke-Validator $fixture)
+            Assert-ValidationCode $json 'STATUS_INVALID' 'errors'
+            Assert-ValidationCode $json 'RUSSIAN_EXPLANATION_MISSING' 'errors'
+            Assert-Equal @($json.errors | Where-Object { $_.code -ceq 'VALIDATION_INVOCATION' }).Count 0
+        }
+        finally { Remove-ValidationFixture $fixture }
+    }
+
+    It 'принимает внешний http related, но отклоняет внешний russian_explanation' {
+        $fixture = New-ValidationFixture
+        try {
+            [IO.File]::WriteAllBytes((Join-Path $fixture.Project 'docs/external.md'), $Utf8.GetBytes("---`nstatus: Draft`nrelated: https://example.com/rules`n---`n# Внешняя ссылка`nРусский текст.`n"))
+            $json = Get-ValidationJson (Invoke-Validator $fixture)
+            Assert-Equal @($json.errors | Where-Object { $_.path -like '*external.md' -and $_.code -ceq 'BROKEN_REQUIRED_LINK' }).Count 0
+            [IO.File]::WriteAllBytes((Join-Path $fixture.Project 'docs/external.md'), $Utf8.GetBytes("---`nstatus: Draft`nrussian_explanation: https://example.com/russian`n---`n# English`nOnly English.`n"))
+            $json = Get-ValidationJson (Invoke-Validator $fixture)
+            Assert-ValidationCode $json 'BROKEN_REQUIRED_LINK' 'errors'
+            Assert-ValidationCode $json 'RUSSIAN_EXPLANATION_MISSING' 'errors'
+        }
+        finally { Remove-ValidationFixture $fixture }
+    }
+
+    It 'отклоняет related, который проходит через junction вне семантической области проекта' {
+        $fixture = New-ValidationFixture
+        $junction = Join-Path $fixture.Project 'docs/link'
+        try {
+            $target = Join-Path $fixture.Container 'outside'
+            New-Item -ItemType Directory -Path $target -Force | Out-Null
+            [IO.File]::WriteAllBytes((Join-Path $target 'russian.md'), $Utf8.GetBytes('Русский целевой документ'))
+            try { New-Item -ItemType Junction -Path $junction -Target $target -ErrorAction Stop | Out-Null }
+            catch { Write-Host 'SKIP junction creation is unavailable; lexical unsafe-link coverage remains active.'; return }
+            [IO.File]::WriteAllBytes((Join-Path $fixture.Project 'docs/junction.md'), $Utf8.GetBytes("---`nstatus: Draft`nrelated: docs/link/russian.md`n---`n# Связь через junction`nРусский текст.`n"))
+            Assert-ValidationCode (Get-ValidationJson (Invoke-Validator $fixture)) 'BROKEN_REQUIRED_LINK' 'errors'
+        }
+        finally { Remove-ValidationJunction $junction; Remove-ValidationFixture $fixture }
     }
 
     It 'сохраняет parseable чистый JSON и русские пути при нескольких diagnostics, а human mode не заявляет успех' {
