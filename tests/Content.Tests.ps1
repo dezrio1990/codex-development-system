@@ -297,4 +297,38 @@ Describe 'Базовые шаблоны проектной документац�
             Assert-TextContains $content $section
         }
     }
+
+    It 'шаблоны требований задают стабильные идентификаторы, приоритеты и исключения' {
+        $functional = Get-Content -LiteralPath (Join-Path $BaseTemplatesPath 'docs/requirements/functional.md') -Encoding UTF8 -Raw -ErrorAction Stop
+        $nonFunctional = Get-Content -LiteralPath (Join-Path $BaseTemplatesPath 'docs/requirements/non-functional.md') -Encoding UTF8 -Raw -ErrorAction Stop
+
+        foreach ($marker in @('FR-', 'UX-', 'Формулировка', 'Критерии приёмки', 'Источник', 'Статус', 'Ссылки', 'Явные исключения', 'Must', 'Should', 'Could', "Won't now")) {
+            Assert-TextContains $functional $marker
+        }
+
+        foreach ($marker in @('NFR-', 'SEC-', 'ACC-', 'OPS-', 'Метрика', 'Метод проверки', 'Источник', 'Статус', 'Ссылки', 'Явные исключения', 'Must', 'Should', 'Could', "Won't now")) {
+            Assert-TextContains $nonFunctional $marker
+        }
+    }
+
+    It 'базовый AGENTS указывает источники истины, команды и Definition of Done' {
+        $content = Get-Content -LiteralPath (Join-Path $BaseTemplatesPath 'AGENTS.md') -Encoding UTF8 -Raw -ErrorAction Stop
+        foreach ($marker in @('Карта документации и источников истины', 'docs/status/current.md', 'docs/plans/active/', 'docs/requirements/', 'docs/architecture/decisions/', 'Утверждённый активный план', 'выбранный overlay', 'документация проекта', 'docs/quality/quality-gates.md')) {
+            Assert-TextContains $content $marker
+        }
+    }
+
+    It 'quality gates содержит полный Definition of Done' {
+        $content = Get-Content -LiteralPath (Join-Path $BaseTemplatesPath 'docs/quality/quality-gates.md') -Encoding UTF8 -Raw -ErrorAction Stop
+        foreach ($marker in @('Definition of Done', 'критерии приёмки выполнены', 'утверждённым требованиям, стеку и архитектуре', 'сборка и необходимые проверки фактически прошли', 'нет необъяснённых ошибок и предупреждений', 'критичные замечания review закрыты', 'безопасность и доступность проверены соразмерно риску', 'документация и `docs/status/current.md` обновлены', 'ограничения и отклонения перечислены', 'пользователь принял результат')) {
+            Assert-TextContains $content $marker
+        }
+    }
+
+    It 'technology stack сохраняет доказательства и решение пользователя' {
+        $content = Get-Content -LiteralPath (Join-Path $BaseTemplatesPath 'docs/architecture/technology-stack.md') -Encoding UTF8 -Raw -ErrorAction Stop
+        foreach ($marker in @('Дата проверки', 'Официальные источники', 'Поддержка', 'Зрелость', 'Производительность', 'Безопасность', 'Стоимость сопровождения', 'Инструменты', 'Минимум два жизнеспособных варианта', 'Сравнение вариантов', 'Рекомендация', 'Ограничения', 'Решение пользователя', 'Preview и experimental API', 'прототипах или через отдельный ADR')) {
+            Assert-TextContains $content $marker
+        }
+    }
 }
